@@ -104,10 +104,11 @@ def _downsample(z, target):
 class WipeView(QWidget):
     """Before/after image with a draggable vertical divider."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, labels=("original", "modified")):
         super().__init__(parent)
         self.before = None
         self.after = None
+        self.labels = labels
         self.split = 0.5
         self.setMinimumSize(PREVIEW_MAX, PREVIEW_MAX)
         self.setSizePolicy(SP_EXPANDING, SP_EXPANDING)
@@ -148,8 +149,10 @@ class WipeView(QWidget):
         p.setPen(QPen(QColor(255, 200, 0), 2))
         p.drawLine(x + cut, y, x + cut, y + side)
         p.setPen(QColor(255, 255, 255))
-        p.drawText(x + 6, y + 18, "original")
-        p.drawText(x + side - 54, y + 18, "eroded")
+        left, right = self.labels
+        p.drawText(x + 6, y + 18, left)
+        p.drawText(x + side - 6 - p.fontMetrics().horizontalAdvance(right),
+                   y + 18, right)
 
     def mousePressEvent(self, e):
         self._drag(e)
@@ -204,7 +207,7 @@ class ErosionPreviewDialog(QDialog):
         self.small = _downsample(heightmap, PREVIEW_MAX)
         self.base_shade = to_pixmap(hillshade(self.small))
 
-        self.view = WipeView()
+        self.view = WipeView(labels=("original", "eroded"))
         self.view.set_images(self.base_shade, None)
 
         self.cmb_preset = QComboBox()

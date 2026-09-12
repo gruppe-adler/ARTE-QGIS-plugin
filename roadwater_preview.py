@@ -36,6 +36,38 @@ except ImportError:  # pragma: no cover - console / test use
     )
 
 
+def shaded_with_delta(base, shaped, ref):
+    """Hillshade of the terrain with the shaping change tinted over it.
+
+    A 7 m road is two or three pixels wide on a 2 km map, so on a plain
+    hillshade the shaping is nearly invisible against the landscape. Drawing
+    the delta on top keeps the terrain readable while showing exactly where
+    the pass cut or filled, and by how much.
+    """
+    import numpy as _np
+    shade = hillshade(shaped, ref=ref).astype(_np.float32)
+    delta = (shaped - base).astype(_np.float32)
+    scale = float(_np.percentile(_np.abs(delta), 99.5)) or 1.0
+    norm = _np.clip(delta / scale, -1.0, 1.0)
+
+    rgb = _np.repeat(shade[:, :, None], 3, axis=2)
+    cut = _np.clip(-norm, 0.0, 1.0)[:, :, None]     # carved down -> blue
+    fill = _np.clip(norm, 0.0, 1.0)[:, :, None]     # built up   -> orange
+    rgb = rgb * (1.0 - 0.65 * (cut + fill))
+    rgb += cut * _np.array([60.0, 140.0, 255.0]) * 0.65
+    rgb += fill * _np.array([255.0, 150.0, 60.0]) * 0.65
+    return _np.clip(rgb, 0, 255).astype(_np.uint8)
+
+
+def to_pixmap_rgb(rgb):
+    import numpy as _np
+    rgb = _np.ascontiguousarray(rgb)
+    h, w, _ = rgb.shape
+    fmt = getattr(QImage, 'Format_RGB888', None) or QImage.Format.Format_RGB888
+    img = QImage(rgb.data, w, h, w * 3, fmt)
+    return QPixmap.fromImage(img.copy())
+
+
 class ProfilePlot(QWidget):
     """Minimal line plot: original vs shaped, with a zero-cant reference."""
 
@@ -162,7 +194,7 @@ class RoadWaterPreviewDialog(QDialog):
         self.rivers = [np.asarray(r, np.float64) * self.scale for r in (rivers or [])]
 
         self.base_shade = to_pixmap(hillshade(self.small))
-        self.view = WipeView()
+        self.view = WipeView(labels=("original", "shaped"))
         self.view.set_images(self.base_shade, None)
 
         self.plot_cross = ProfilePlot()
@@ -190,6 +222,13 @@ class RoadWaterPreviewDialog(QDialog):
             grid.addWidget(QLabel(name), i, 0)
             grid.addWidget(widget, i, 1)
 
+        self.chk_delta = QCheckBox("Highlight what shaping changed")
+        self.chk_delta.setChecked(True)
+        self.chk_delta.setToolTip(
+            "Tints cut in blue and fill in orange over the terrain hillshade.\n"
+            "Without it a road only a few pixels wide is hard to find.")
+        self.chk_delta.stateChanged.connect(self._redraw)
+
         self.lbl_stats = QLabel()
         self.lbl_stats.setWordWrap(True)
         self.lbl_stats.setStyleSheet("color:#9aa;")
@@ -197,6 +236,7 @@ class RoadWaterPreviewDialog(QDialog):
         box = QGroupBox("Shaping")
         bl = QVBoxLayout(box)
         bl.addLayout(grid)
+        bl.addWidget(self.chk_delta)
         bl.addWidget(self.lbl_stats)
 
         tabs = QTabWidget()
@@ -276,9 +316,19 @@ class RoadWaterPreviewDialog(QDialog):
 
     def _ready(self, out):
         self.bar.hide()
-        self.view.set_images(self.base_shade,
-                             to_pixmap(hillshade(out, ref=self.small)))
+        self._last = out
+        self._redraw()
         self._update_plots(out)
+
+    def _redraw(self):
+        out = getattr(self, '_last', None)
+        if out is None:
+            return
+        if self.chk_delta.isChecked():
+            after = to_pixmap_rgb(shaded_with_delta(self.small, out, self.small))
+        else:
+            after = to_pixmap(hillshade(out, ref=self.small))
+        self.view.set_images(self.base_shade, after)
         if self._pending:
             self._pending = False
             self._run()

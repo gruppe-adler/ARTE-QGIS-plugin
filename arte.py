@@ -118,6 +118,37 @@ DEFAULT_SOURCES = [
 ]
 
 # --- Map Tool classes ---
+def _find_heightmap(directory):
+	"""Newest real heightmap export in `directory`, or None.
+
+	ARTE also writes ``heightmap_diff_*.tif``, a debug raster holding only what
+	the terrain engineer changed. It sorts after ``heightmap_<stamp>.png`` in a
+	reverse listing, so a naive "first match" picks the diff and the preview
+	shows roads floating on a blank field instead of terrain.
+	"""
+	import os
+	if not directory or not os.path.isdir(directory):
+		return None
+	cands = []
+	for name in os.listdir(directory):
+		low = name.lower()
+		if not low.startswith("heightmap"):
+			continue
+		if not low.endswith((".png", ".tif", ".tiff")):
+			continue
+		if "_diff" in low or "debug" in low or "preview" in low:
+			continue
+		path = os.path.join(directory, name)
+		try:
+			cands.append((os.path.getmtime(path), path))
+		except OSError:
+			continue
+	if not cands:
+		return None
+	cands.sort()
+	return cands[-1][1]
+
+
 def _arte_import(name):
 	"""Import a sibling module of this plugin.
 
@@ -1367,21 +1398,15 @@ class CombinedArmaInputDialog(QDialog):
 			return
 
 		path = self.le_path.text().strip()
-		candidates = []
-		if path and os.path.isdir(path):
-			for name in sorted(os.listdir(path), reverse=True):
-				if name.lower().startswith("heightmap") and name.lower().endswith((".png", ".tif", ".asc")):
-					candidates.append(os.path.join(path, name))
+		src = _find_heightmap(path)
 
-		if not candidates:
+		if not src:
 			QMessageBox.information(
 				self, "Erosion Preview",
 				"No heightmap found in the output directory yet.\n\n"
 				"Run an export once, then use this button to tune erosion "
 				"against that heightmap and re-export.")
 			return
-
-		src = candidates[0]
 		try:
 			QApplication.setOverrideCursor(_Qt.WaitCursor if hasattr(_Qt, 'WaitCursor')
 										   else _Qt.CursorShape.WaitCursor)
@@ -1421,12 +1446,7 @@ class CombinedArmaInputDialog(QDialog):
 			return
 
 		path = self.le_path.text().strip()
-		src = None
-		if path and os.path.isdir(path):
-			for name in sorted(os.listdir(path), reverse=True):
-				if name.lower().startswith("heightmap") and name.lower().endswith((".png", ".tif")):
-					src = os.path.join(path, name)
-					break
+		src = _find_heightmap(path)
 		if not src:
 			QMessageBox.information(
 				self, "Shaping Preview",
