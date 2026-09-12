@@ -118,6 +118,30 @@ DEFAULT_SOURCES = [
 ]
 
 # --- Map Tool classes ---
+def _arte_import(name):
+	"""Import a sibling module of this plugin.
+
+	QGIS loads the plugin as a package, so a bare ``import erosion`` does not
+	resolve -- the plugin directory is not on sys.path. Try the package-relative
+	import first, then fall back to a direct one so the modules stay usable from
+	the QGIS Python console and from tests.
+	"""
+	import importlib
+	if __package__:
+		try:
+			return importlib.import_module("." + name, __package__)
+		except ImportError:
+			pass
+	try:
+		return importlib.import_module(name)
+	except ImportError:
+		import os, sys
+		here = os.path.dirname(os.path.abspath(__file__))
+		if here not in sys.path:
+			sys.path.insert(0, here)
+		return importlib.import_module(name)
+
+
 class ArmaAdvancedMapTool(QgsMapTool):
 	extentSelected = pyqtSignal(object)
 
@@ -1368,10 +1392,10 @@ class CombinedArmaInputDialog(QDialog):
 			QApplication.restoreOverrideCursor()
 
 		try:
-			import erosion_preview
+			erosion_preview = _arte_import('erosion_preview')
 			pixel = None
 			try:
-				pixel = float(self.sb_size_w.value()) / float(self.sb_res_hm_w.value())
+				pixel = float(self.sb_size_w.value()) / float(self.sb_res_w.value())
 			except Exception:
 				pass
 			dlg = erosion_preview.ErosionPreviewDialog(arr, pixel_size=pixel, parent=self)
@@ -1414,7 +1438,7 @@ class CombinedArmaInputDialog(QDialog):
 			ds = _gdal.Open(src)
 			arr = ds.GetRasterBand(1).ReadAsArray().astype('float32')
 			ds = None
-			pixel = float(self.sb_size_w.value()) / float(self.sb_res_hm_w.value())
+			pixel = float(self.sb_size_w.value()) / float(self.sb_res_w.value())
 		except Exception as exc:
 			QMessageBox.warning(self, "Shaping Preview", "Could not read heightmap: %s" % exc)
 			return
@@ -1426,7 +1450,7 @@ class CombinedArmaInputDialog(QDialog):
 		rivers = [_np.array([[float(r), w * 0.5] for r in range(0, h, 8)])]
 
 		try:
-			import roadwater_preview
+			roadwater_preview = _arte_import('roadwater_preview')
 			dlg = roadwater_preview.RoadWaterPreviewDialog(
 				arr, roads=roads, rivers=rivers, pixel_size=pixel, parent=self)
 			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
@@ -1940,7 +1964,7 @@ class TerrainEngineer:
 				# costs the export.
 				used_profile_roads = False
 				try:
-					import roadwater
+					roadwater = _arte_import('roadwater')
 					gt = ds_elev.GetGeoTransform()
 					inv_x = 1.0 / gt[1] if gt[1] else 0.0
 					inv_y = 1.0 / gt[5] if gt[5] else 0.0
@@ -1987,7 +2011,7 @@ class TerrainEngineer:
 				# the roads: any failure drops through to the geomorph pass below.
 				used_profile_rivers = False
 				try:
-					import roadwater as _rw
+					_rw = _arte_import('roadwater')
 					_gt = ds_elev.GetGeoTransform()
 					_ix = 1.0 / _gt[1] if _gt[1] else 0.0
 					_iy = 1.0 / _gt[5] if _gt[5] else 0.0
@@ -2307,7 +2331,7 @@ class ArmaExportPlugin:
 				self._erosion_settings = tuned
 			else:
 				try:
-					import erosion as _ero
+					_ero = _arte_import('erosion')
 					name = dialog.cmb_erosion.currentText()
 					pre = _ero.PRESETS.get(name, _ero.PRESETS['moderate'])
 					params = dict(_ero.DEFAULTS)
@@ -2703,7 +2727,7 @@ class ArmaExportPlugin:
 			if erosion_settings:
 				try:
 					step(86, "Running hydraulic erosion...")
-					import erosion as _erosion
+					_erosion = _arte_import('erosion')
 
 					elev_f = elevation_resampled.astype(np.float32)
 					params = dict(erosion_settings.get('params', {}))

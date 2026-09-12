@@ -77,14 +77,25 @@ def smooth_profile(prof, pixel_size, smooth_m=60.0, max_grade=None):
     if max_grade:
         step = max(pixel_size, 1e-6)
         limit = max_grade * step
-        # Two passes: forward then backward, so the cap applies in both
-        # directions and the result does not drift toward one end.
+
+        # The cap has to be checked against what the terrain actually does.
+        # Chaining it station by station makes the profile an integrator: on a
+        # slope steeper than the limit it cannot descend fast enough, so it
+        # floats higher and higher above the ground -- measured 37 m above
+        # terrain partway along a road dropping 132 m, which then stamps a
+        # ridge instead of a road. Only apply the cap where the road can
+        # actually follow it, and re-anchor to the ground otherwise.
+        ground = out.copy()
+        max_float = max(2.0, limit * 8.0)
         for _ in range(2):
             for i in range(1, len(out)):
                 d = out[i] - out[i - 1]
                 if abs(d) > limit:
                     out[i] = out[i - 1] + np.sign(d) * limit
+                if abs(out[i] - ground[i]) > max_float:
+                    out[i] = ground[i]
             out = out[::-1]
+            ground = ground[::-1]
     return out
 
 

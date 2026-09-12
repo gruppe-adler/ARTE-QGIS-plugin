@@ -24,10 +24,16 @@ from qgis.PyQt.QtWidgets import (
     QTabWidget, QDoubleSpinBox
 )
 
-import roadwater
-from erosion_preview import (
-    hillshade, to_pixmap, WipeView, _downsample, SP_EXPANDING, HORIZONTAL
-)
+try:
+    from . import roadwater
+    from .erosion_preview import (
+        hillshade, to_pixmap, WipeView, _downsample, SP_EXPANDING, HORIZONTAL
+    )
+except ImportError:  # pragma: no cover - console / test use
+    import roadwater
+    from erosion_preview import (
+        hillshade, to_pixmap, WipeView, _downsample, SP_EXPANDING, HORIZONTAL
+    )
 
 
 class ProfilePlot(QWidget):

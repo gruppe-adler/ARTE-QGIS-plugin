@@ -22,7 +22,10 @@ from qgis.PyQt.QtWidgets import (
     QGridLayout, QGroupBox, QWidget, QSizePolicy, QCheckBox, QProgressBar
 )
 
-import erosion
+try:
+    from . import erosion          # loaded as part of the plugin package
+except ImportError:  # pragma: no cover - console / test use
+    import erosion
 
 
 PREVIEW_MAX = 512
