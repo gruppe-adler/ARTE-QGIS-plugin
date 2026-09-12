@@ -70,9 +70,6 @@ Requires numpy and scipy, both bundled with QGIS. Loads under Qt5 and Qt6.
 - Erosion is bounded to a band around the input heightmap. Without that it runs
   away: measured relief growing 489 m → 3950 m at 100k particles, because
   thousands of droplets revisit the same pixel and their edits compound.
-- Verify any heightmap before importing it. Two defects have cost real time on
-  this project: a truncated Gaea write (89% of the file missing, no IEND chunk)
-  and the NoData border above.
 
 ## Licence
 
