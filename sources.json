@@ -1,0 +1,50 @@
+[
+    {
+        "name": "AWS Terrarium (Free, Global 30m, Enhanced Smooth)",
+        "url": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+        "type": "xyz",
+        "format": "PNG",
+        "decoder": "terrarium",
+        "requires_api": false,
+        "datasets": []
+    },
+    {
+        "name": "Mapbox Terrain-RGB (API Key Required, Higher Detail)",
+        "url": "https://api.mapbox.com/v4/mapbox.terrain-rgb/{z}/{x}/{y}.png?access_token={api_key}",
+        "type": "xyz",
+        "format": "PNG",
+        "decoder": "mapbox",
+        "requires_api": true,
+        "datasets": []
+    },
+    {
+        "name": "LiDAR (BEV / OpenTopography) - API Key Required",
+        "url": "https://portal.opentopography.org/API/globaldem?demtype={ot_dem_type}&south={south}&north={north}&west={west}&east={east}&outputFormat=GTiff&API_Key={api_key}",
+        "type": "bbox",
+        "format": "GTiff",
+        "decoder": "none",
+        "requires_api": true,
+        "datasets": [
+            {
+                "name": "COP30 (Best Global - Clean & Modern)",
+                "value": "COP30"
+            },
+            {
+                "name": "AW3D30 (Good Global - Detailed)",
+                "value": "AW3D30"
+            },
+            {
+                "name": "EU_DTM (Best for Europe - Bare Earth)",
+                "value": "EU_DTM"
+            },
+            {
+                "name": "NASADEM (Good Global Alternative)",
+                "value": "NASADEM"
+            },
+            {
+                "name": "SRTMGL1 (Classic NASA DEM)",
+                "value": "SRTMGL1"
+            }
+        ]
+    }
+]
