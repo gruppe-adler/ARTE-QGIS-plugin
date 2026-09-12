@@ -1423,13 +1423,85 @@ class CombinedArmaInputDialog(QDialog):
 				pixel = float(self.sb_size_w.value()) / float(self.sb_res_w.value())
 			except Exception:
 				pass
-			dlg = erosion_preview.ErosionPreviewDialog(arr, pixel_size=pixel, parent=self)
+			# Hand the preview the same OSM centrelines the export will shape,
+			# so 'preserve roads' has something to act on.
+			protect_lines = self._osm_preview_lines(arr.shape)
+			dlg = erosion_preview.ErosionPreviewDialog(
+				arr, pixel_size=pixel, parent=self, protect_lines=protect_lines)
 			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
 			if accepted:
 				self.erosion_settings = dlg.result_settings()
 				self.cb_erosion.setChecked(True)
 		except Exception as exc:
 			QMessageBox.warning(self, "Erosion Preview", "Preview failed: %s" % exc)
+
+	def _osm_preview_lines(self, shape):
+		"""Road and waterway centrelines for the current extent, in pixel coords.
+
+		Queries Overpass directly rather than reusing TerrainEngineer, which only
+		runs inside a full export. Returns an empty list on any failure -- the
+		preview is still useful without it, so a network problem must not raise.
+		"""
+		try:
+			import json, urllib.request
+			import numpy as _np
+
+			cx = float(self.sb_x.value())
+			cy = float(self.sb_y.value())
+			size_w = float(self.sb_size_w.value())
+			size_h = float(self.sb_size_h.value())
+			if size_w <= 0 or size_h <= 0:
+				return []
+
+			# Rough metres-per-degree at this latitude is accurate enough for a
+			# preview bounding box.
+			m_lat = 111132.92 - 559.82 * math.cos(2 * math.radians(cy))
+			m_lon = 111412.84 * math.cos(math.radians(cy))
+			if m_lat <= 0 or m_lon <= 0:
+				return []
+			dlat = (size_h / 2.0) / m_lat
+			dlon = (size_w / 2.0) / m_lon
+			south, north = cy - dlat, cy + dlat
+			west, east = cx - dlon, cx + dlon
+
+			query = ('[out:json][timeout:45];('
+					 'way["highway"](%f,%f,%f,%f);'
+					 'way["railway"](%f,%f,%f,%f);'
+					 'way["waterway"](%f,%f,%f,%f);'
+					 ');out geom;') % (south, west, north, east,
+									   south, west, north, east,
+									   south, west, north, east)
+
+			data = None
+			for url in ("https://overpass-api.de/api/interpreter",
+						"https://overpass.kumi.systems/api/interpreter"):
+				try:
+					req = urllib.request.Request(
+						url, data=query.encode("utf-8"),
+						headers={"User-Agent": "ARTE-QGIS-plugin"})
+					with urllib.request.urlopen(req, timeout=50) as resp:
+						data = json.loads(resp.read().decode("utf-8"))
+					break
+				except Exception:
+					continue
+			if not data:
+				return []
+
+			h, w = shape
+			lines = []
+			for el in data.get("elements", []):
+				geom = el.get("geometry")
+				if not geom or len(geom) < 2:
+					continue
+				pts = []
+				for node in geom:
+					col = (node["lon"] - west) / (east - west) * (w - 1)
+					row = (north - node["lat"]) / (north - south) * (h - 1)
+					pts.append((row, col))
+				lines.append(_np.array(pts, dtype=float))
+			return lines
+		except Exception:
+			return []
 
 	def open_roadwater_preview(self):
 		"""Preview road/river shaping against the last exported heightmap.
@@ -1463,11 +1535,16 @@ class CombinedArmaInputDialog(QDialog):
 			QMessageBox.warning(self, "Shaping Preview", "Could not read heightmap: %s" % exc)
 			return
 
-		# Without OSM geometry the preview still works: it demonstrates the
-		# controls on a straight line through the middle of the map.
+		# Prefer the real OSM geometry for this extent; fall back to a straight
+		# demo line so the controls are still explorable offline.
 		h, w = arr.shape
-		roads = [_np.array([[h * 0.5, float(c)] for c in range(0, w, 8)])]
-		rivers = [_np.array([[float(r), w * 0.5] for r in range(0, h, 8)])]
+		lines = self._osm_preview_lines(arr.shape)
+		if lines:
+			roads = lines
+			rivers = []
+		else:
+			roads = [_np.array([[h * 0.5, float(c)] for c in range(0, w, 8)])]
+			rivers = [_np.array([[float(r), w * 0.5] for r in range(0, h, 8)])]
 
 		try:
 			roadwater_preview = _arte_import('roadwater_preview')

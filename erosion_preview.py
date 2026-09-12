@@ -174,16 +174,18 @@ class _Worker(QThread):
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, hmap, params, pixel_size=None):
+    def __init__(self, hmap, params, pixel_size=None, protect=None):
         super().__init__()
         self.hmap = hmap
         self.params = params
         self.pixel_size = pixel_size
+        self.protect = protect
 
     def run(self):
         try:
             self.done.emit(erosion.simulate(self.hmap, self.params, seed=1,
-                                            pixel_size=self.pixel_size))
+                                            pixel_size=self.pixel_size,
+                                            protect_mask=self.protect))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -191,7 +193,8 @@ class _Worker(QThread):
 class ErosionPreviewDialog(QDialog):
     """Tune erosion against a live preview; returns the chosen settings."""
 
-    def __init__(self, heightmap, pixel_size=None, parent=None):
+    def __init__(self, heightmap, pixel_size=None, parent=None,
+                 protect_lines=None, protect_width_m=12.0):
         super().__init__(parent)
         self.setWindowTitle("ARTE - Hydraulic Erosion")
         self.resize(900, 640)
@@ -200,12 +203,16 @@ class ErosionPreviewDialog(QDialog):
         self.pixel_size = pixel_size
         self.worker = None
         self._pending = False
+        self._protect_lines = protect_lines or []
+        self._protect_width_m = protect_width_m
+        self._protect = None
 
         # Downsample once; every preview run starts from this. Block-average
         # rather than stride: heightmap[::32, ::32] keeps 1 pixel in 1024 and
         # can miss whole valleys, which makes the preview unrepresentative.
         self.small = _downsample(heightmap, PREVIEW_MAX)
         self.base_shade = to_pixmap(hillshade(self.small))
+        self._build_protect_mask()
 
         self.view = WipeView(labels=("original", "eroded"))
         self.view.set_images(self.base_shade, None)
@@ -293,10 +300,33 @@ class ErosionPreviewDialog(QDialog):
         for s in (self.sl_strength, self.sl_detail, self.sl_radius, self.sl_deposit):
             s.valueChanged.connect(self._on_change)
         self.cmb_preset.currentTextChanged.connect(self._on_preset)
+        # Without this the checkbox only affected the export, never the preview.
+        self.chk_protect.toggled.connect(lambda _=None: self._run_preview())
 
         self._sync_labels()
+        self._sync_protect_state()
         self._refresh_info()
         self._run_preview()
+
+    def _sync_protect_state(self):
+        """Disable the protect toggle when there is no geometry to protect.
+
+        Leaving it enabled and inert is worse than disabling it: it looks like
+        a setting that does nothing.
+        """
+        have = self._protect is not None and bool(self._protect.any())
+        self.chk_protect.setEnabled(have)
+        if have:
+            n = int(self._protect.sum())
+            self.chk_protect.setText(
+                "Preserve roads / rivers (%s px protected)" % "{:,}".format(n))
+        else:
+            self.chk_protect.setText(
+                "Preserve roads / rivers (no OSM geometry loaded)")
+            self.chk_protect.setToolTip(
+                "No road or river centrelines were passed to this preview, so "
+                "there is nothing to protect. The export still protects "
+                "whatever the terrain engineer shaped.")
 
     def _slider(self, lo, hi, val):
         s = QSlider(HORIZONTAL)
@@ -371,6 +401,29 @@ class ErosionPreviewDialog(QDialog):
             'parallel': self.chk_parallel.isChecked(),
         }
 
+    def _build_protect_mask(self):
+        """Corridor mask at preview scale from road/river centrelines."""
+        self._protect = None
+        if not self._protect_lines:
+            return
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except ImportError:
+            return
+        scale = float(self.small.shape[0]) / max(1, self.full.shape[0])
+        seeds = np.zeros(self.small.shape, bool)
+        h, w = self.small.shape
+        for line in self._protect_lines:
+            pts = np.asarray(line, np.float64) * scale
+            rr = np.clip(pts[:, 0].astype(int), 0, h - 1)
+            cc = np.clip(pts[:, 1].astype(int), 0, w - 1)
+            seeds[rr, cc] = True
+        if not seeds.any():
+            return
+        px = (self.pixel_size or 1.0) / max(scale, 1e-9)
+        radius_px = max(1.0, (self._protect_width_m * 0.5) / max(px, 1e-6))
+        self._protect = distance_transform_edt(~seeds) <= radius_px
+
     def _run_preview(self):
         if self.worker and self.worker.isRunning():
             self._pending = True
@@ -379,7 +432,8 @@ class ErosionPreviewDialog(QDialog):
         mp = (self.small.shape[0] * self.small.shape[1]) / 1e6
         cfg['n_particles'] = max(2000, int(self._per_mp() * mp))
         self.bar.show()
-        self.worker = _Worker(self.small, cfg, self.pixel_size)
+        protect = self._protect if self.chk_protect.isChecked() else None
+        self.worker = _Worker(self.small, cfg, self.pixel_size, protect)
         self.worker.done.connect(self._preview_ready)
         self.worker.failed.connect(self._preview_failed)
         self.worker.start()
