@@ -370,8 +370,13 @@ def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
             for i, res in enumerate(pool.imap(_tile_worker, tiles)):
                 results.append(res)
                 if progress:
+                    # Tiles finish in bursts because the workers start together,
+                    # so the label sits unchanged for long stretches. Naming the
+                    # stage as well as the count makes it clear the export is
+                    # still moving rather than wedged.
                     progress((i + 1) / len(tiles),
-                             "Eroded tile {} / {}".format(i + 1, len(tiles)))
+                             "Eroding: {} of {} tiles done ({} workers)".format(
+                                 i + 1, len(tiles), min(workers, len(tiles))))
     except Exception:
         # Pools can fail inside embedded interpreters (QGIS is one); the
         # simulation still has to produce a result.

@@ -1967,7 +1967,15 @@ class TerrainEngineer:
 
 					mask = arr == burn_val
 					debug_log(f"    -> Mask '{file_prefix}' generated. Active pixels: {np.sum(mask)}")
+					# Twelve masks take roughly a second each. Tick the dialog after
+					# each so the window stays responsive and cancellable instead of
+					# going grey for the whole batch.
+					mask_progress['done'] += 1
+					step_callback(82, "Rasterizing OSM masks (%d/%d)..."
+								  % (mask_progress['done'], mask_progress['total']))
 					return mask
+
+				mask_progress = {'done': 0, 'total': 12}
 
 				no_bridge_tunnel = " AND (\"bridge\" IS NULL OR \"bridge\" NOT IN ('yes','true','1')) AND (\"tunnel\" IS NULL OR \"tunnel\" NOT IN ('yes','true','1'))"
 
@@ -2087,15 +2095,24 @@ class TerrainEngineer:
 						(layer_rails, BUFF_RAIL, 5.0, 150.0, 0.025, "Railways"),
 					]
 					shaped_any = False
-					for lyr, half_w, feather, smooth_m, grade, nm in road_specs:
+					# Spread the four road classes across the 83-84 progress band so
+					# the dialog keeps moving and stays cancellable. Shaping takes
+					# tens of seconds; a static bar reads as a hang.
+					for _si, (lyr, half_w, feather, smooth_m, grade, nm) in enumerate(road_specs):
 						lines = roadwater.extract_lines(lyr, _to_px)
 						if not lines:
 							continue
+
+						def _road_tick(done, total, _n=nm, _i=_si):
+							step_callback(
+								83, "Shaping %s (%d/%d)..." % (_n, done, total))
+
 						elev_array = roadwater.apply_roads(
 							elev_array, lines, pixel_size,
 							half_width_m=half_w, feather_m=feather,
 							smooth_m=smooth_m, max_grade=grade,
-							log=lambda m, _n=nm: debug_log("  [%s] %s" % (_n, m)))
+							log=lambda m, _n=nm: debug_log("  [%s] %s" % (_n, m)),
+							progress=_road_tick)
 						shaped_any = True
 					used_profile_roads = shaped_any
 				except MemoryError as _rw_mem:
@@ -2138,12 +2155,16 @@ class TerrainEngineer:
 
 					_wlines = _rw.extract_lines(layer_water_lines, _wpx)
 					if _wlines:
+						def _river_tick(done, total):
+							step_callback(84, "Carving rivers (%d/%d)..." % (done, total))
+
 						elev_array = _rw.apply_rivers(
 							elev_array, _wlines, pixel_size,
 							half_width_m=max(2.0, BUFF_WATER * 0.5),
 							feather_m=max(3.0, BUFF_WATER),
 							depth_m=1.5,
-							log=lambda m: debug_log("  [Rivers] %s" % m))
+							log=lambda m: debug_log("  [Rivers] %s" % m),
+							progress=_river_tick)
 						used_profile_rivers = True
 				except MemoryError as _rv_mem:
 					debug_log("OUT OF MEMORY in per-feature river carving (%s). "

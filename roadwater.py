@@ -240,13 +240,20 @@ def stamp_profile(z, pts, prof, half_width_px, feather_px, out=None,
 # ---------------------------------------------------------------------------
 
 def apply_roads(z, features, pixel_size, half_width_m, feather_m,
-                smooth_m=60.0, max_grade=0.08, log=None):
-    """Flatten each road/rail corridor along its own smoothed profile."""
+                smooth_m=60.0, max_grade=0.08, log=None, progress=None):
+    """Flatten each road/rail corridor along its own smoothed profile.
+
+    `progress` is called as progress(done, total) after each feature. Shaping a
+    full export takes tens of seconds; without a per-feature tick the caller has
+    nothing to report and the UI simply stops responding, which is
+    indistinguishable from a hang.
+    """
     out = z.astype(np.float32).copy()
     weight = np.zeros(z.shape, np.float32)
     half_px = max(0.5, half_width_m / max(pixel_size, 1e-6))
     feather_px = max(0.5, feather_m / max(pixel_size, 1e-6))
 
+    total = len(features)
     done = 0
     for pts in features:
         pts = np.asarray(pts, np.float64)
@@ -258,6 +265,8 @@ def apply_roads(z, features, pixel_size, half_width_m, feather_m,
         out, weight = stamp_profile(z, pts, prof, half_px, feather_px,
                                     out=out, weight=weight)
         done += 1
+        if progress:
+            progress(done, total)
 
     if log:
         log("Roads shaped: %d features, %d px modified"
@@ -266,7 +275,7 @@ def apply_roads(z, features, pixel_size, half_width_m, feather_m,
 
 
 def apply_rivers(z, features, pixel_size, half_width_m, feather_m,
-                 depth_m=1.5, bank_m=None, log=None):
+                 depth_m=1.5, bank_m=None, log=None, progress=None):
     """Carve waterways along a monotonically descending profile."""
     out = z.astype(np.float32).copy()
     weight = np.zeros(z.shape, np.float32)
@@ -274,6 +283,7 @@ def apply_rivers(z, features, pixel_size, half_width_m, feather_m,
     feather_px = max(0.5, (bank_m if bank_m else feather_m) /
                      max(pixel_size, 1e-6))
 
+    total = len(features)
     done = 0
     for pts in features:
         pts = np.asarray(pts, np.float64)
@@ -291,6 +301,8 @@ def apply_rivers(z, features, pixel_size, half_width_m, feather_m,
         out, weight = stamp_profile(z, pts, prof, half_px, feather_px,
                                     out=out, weight=weight, depth=depth_m)
         done += 1
+        if progress:
+            progress(done, total)
 
     # Never raise terrain when carving: a channel should cut in, not build up.
     # Applying that as a blanket minimum would undo the monotonic bed, because
