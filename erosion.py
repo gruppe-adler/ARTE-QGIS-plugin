@@ -125,20 +125,38 @@ def _erode_brush(hmap, x, y, amount, radius, offsets=None):
 
 
 def simulate(heightmap, params=None, protect_mask=None, progress=None,
-             seed=None):
+             seed=None, pixel_size=None):
     """Erode `heightmap` (2-D float array, any vertical unit) and return a new one.
 
     protect_mask : optional bool array, True where terrain must not change
                    (roads, rails, river beds already shaped by the engineer).
     progress     : optional callable(fraction, message).
+    pixel_size   : accepted for API symmetry; the scale correction is derived
+                   from the heightmap itself (see below) and does not need it.
     """
     p = dict(DEFAULTS)
     if params:
         p.update(params)
 
-    hmap = heightmap.astype(np.float32, copy=True)
+    # The droplet model reads slope as the height change over one pixel step,
+    # and sediment capacity is proportional to it. A coarser export has a
+    # larger height change per pixel for the same terrain -- measured 1.28 m
+    # mean at 4.2 m/px against 0.32 m at 1.1 m/px -- so capacity, erosion and
+    # deposition all scale with resolution and a coarse map inflates: relief
+    # grew from 488 m to 2377 m before this was corrected.
+    #
+    # Normalise by the map's own typical per-pixel height change, so the
+    # simulation always sees slopes of order 1 regardless of resolution or
+    # vertical units, then restore the scale afterwards.
+    src = heightmap.astype(np.float32)
+    typical = float(np.percentile(np.abs(np.gradient(src)[0]), 90))
+    if not np.isfinite(typical) or typical <= 0:
+        typical = 1.0
+    vscale = np.float32(typical)
+
+    hmap = (src / vscale).copy()
     h, w = hmap.shape
-    original = hmap.copy() if protect_mask is not None else None
+    original = heightmap.astype(np.float32).copy() if protect_mask is not None else None
 
     rng = np.random.default_rng(seed)
     brush = _brush_offsets(int(p['radius'])) if int(p['radius']) > 0 else None
@@ -148,11 +166,21 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
     relief = float(np.ptp(hmap))
     if not np.isfinite(relief) or relief <= 0:
         relief = 1.0
-    # Generous enough not to constrain erosion on real terrain (measured
-    # identical channel structure from 0.05 up to 1.0 of relief), tight enough
-    # to stop the runaway pit feedback that produces inf/NaN.
-    max_change = np.float32(relief * 0.25)
+    # Two separate limits are needed.
+    #
+    # Per step: stops a single droplet moving an absurd amount of material.
+    #
+    # Cumulative: the per-step limit alone does not bound the total, because
+    # thousands of droplets revisit the same pixel and their edits compound.
+    # Past roughly 20k particles on a 1 MP map that runs away -- measured
+    # relief growing 489 m -> 3950 m at 100k particles. Erosion is meant to
+    # add drainage detail, not restructure the landscape, so hold the result
+    # within a band around the input.
+    max_change = np.float32(relief * 0.02)
     max_vel_sq = np.float32(relief * relief)
+    deviation_cap = np.float32(relief * 0.08)
+    floor = (src / vscale) - deviation_cap
+    ceil = (src / vscale) + deviation_cap
     n = int(p['n_particles'])
     if n <= 0:
         return hmap
@@ -234,9 +262,15 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
             dx[idx], dy[idx] = ndx, ndy
             alive[idx[oob | (water[idx] < 0.01)]] = False
 
+        # Re-impose the cumulative band after each wave. Doing it per step
+        # would serialise the vectorised inner loop for no extra benefit.
+        np.clip(hmap, floor, ceil, out=hmap)
+
         done += count
         if progress:
             progress(done / n, "Eroding: {:,} / {:,} particles".format(done, n))
+
+    hmap *= np.float32(vscale)
 
     if protect_mask is not None:
         hmap = np.where(protect_mask, original, hmap)
@@ -268,12 +302,12 @@ def resolve_params(preset, heightmap_shape, overrides=None):
 
 def _tile_worker(args):
     """Erode one tile. Top-level so it survives pickling on Windows spawn."""
-    sub, params, seed = args
-    return simulate(sub, params, seed=seed)
+    sub, params, seed, pixel_size = args
+    return simulate(sub, params, seed=seed, pixel_size=pixel_size)
 
 
 def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
-                      seed=None, workers=None, overlap=64):
+                      seed=None, workers=None, overlap=64, pixel_size=None):
     """Same as simulate() but splits the map across processes.
 
     Tiles are eroded independently and feathered back together over `overlap`
@@ -299,13 +333,15 @@ def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
     # Below roughly 4 MP the serial path wins: spawning interpreters and
     # pickling tiles costs more than the simulation itself.
     if workers <= 1 or h * w < 4_000_000:
-        return simulate(heightmap, p, protect_mask, progress, seed)
+        return simulate(heightmap, p, protect_mask, progress, seed,
+                        pixel_size=pixel_size)
 
     grid = 1
     while (grid + 1) ** 2 <= workers and (h // (grid + 1)) > 4 * overlap:
         grid += 1
     if grid <= 1:
-        return simulate(heightmap, p, protect_mask, progress, seed)
+        return simulate(heightmap, p, protect_mask, progress, seed,
+                        pixel_size=pixel_size)
 
     hmap = heightmap.astype(np.float32, copy=True)
     tiles = []
@@ -321,7 +357,7 @@ def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
             sub = hmap[y0:y1, x0:x1].copy()
             tp = dict(p)
             tp['n_particles'] = max(1, int(p['n_particles'] * sub.size / hmap.size))
-            tiles.append((sub, tp, (seed or 0) + len(tiles)))
+            tiles.append((sub, tp, (seed or 0) + len(tiles), pixel_size))
             boxes.append((y0, y1, x0, x1))
 
     if progress:
@@ -339,7 +375,8 @@ def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
     except Exception:
         # Pools can fail inside embedded interpreters (QGIS is one); the
         # simulation still has to produce a result.
-        return simulate(heightmap, p, protect_mask, progress, seed)
+        return simulate(heightmap, p, protect_mask, progress, seed,
+                        pixel_size=pixel_size)
 
     acc = np.zeros_like(hmap)
     wsum = np.zeros_like(hmap)

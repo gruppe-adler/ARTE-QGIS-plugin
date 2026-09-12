@@ -168,14 +168,16 @@ class _Worker(QThread):
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, hmap, params):
+    def __init__(self, hmap, params, pixel_size=None):
         super().__init__()
         self.hmap = hmap
         self.params = params
+        self.pixel_size = pixel_size
 
     def run(self):
         try:
-            self.done.emit(erosion.simulate(self.hmap, self.params, seed=1))
+            self.done.emit(erosion.simulate(self.hmap, self.params, seed=1,
+                                            pixel_size=self.pixel_size))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -371,7 +373,7 @@ class ErosionPreviewDialog(QDialog):
         mp = (self.small.shape[0] * self.small.shape[1]) / 1e6
         cfg['n_particles'] = max(2000, int(self._per_mp() * mp))
         self.bar.show()
-        self.worker = _Worker(self.small, cfg)
+        self.worker = _Worker(self.small, cfg, self.pixel_size)
         self.worker.done.connect(self._preview_ready)
         self.worker.failed.connect(self._preview_failed)
         self.worker.start()

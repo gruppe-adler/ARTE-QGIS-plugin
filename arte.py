@@ -1873,10 +1873,47 @@ class TerrainEngineer:
 					debug_log(f"Applied ribbon '{name}'. Modified pixels: {np.sum(new_z != current_z)}")
 					return new_z
 
-				elev_array = apply_flat_ribbon(elev_array, mask_light_c, mask_light_b, sigma=1.0, falloff_dist=2.0, name="Light Roads")
-				elev_array = apply_flat_ribbon(elev_array, mask_medium_c, mask_medium_b, sigma=2.5, falloff_dist=4.0, name="Medium Roads")
-				elev_array = apply_flat_ribbon(elev_array, mask_heavy_c, mask_heavy_b, sigma=4.0, falloff_dist=6.0, name="Heavy Roads")
-				elev_array = apply_flat_ribbon(elev_array, mask_rails_c, mask_rails_b, sigma=3.5, falloff_dist=5.0, name="Railways")
+				# Per-feature shaping walks each polyline and flattens along its own
+				# profile, which leaves no cross-slope. Fall back to the raster ribbon
+				# if anything about the vector path fails, so a shaping problem never
+				# costs the export.
+				used_profile_roads = False
+				try:
+					import roadwater
+					gt = ds_elev.GetGeoTransform()
+					inv_x = 1.0 / gt[1] if gt[1] else 0.0
+					inv_y = 1.0 / gt[5] if gt[5] else 0.0
+
+					def _to_px(mx, my):
+						return ((my - gt[3]) * inv_y, (mx - gt[0]) * inv_x)
+
+					road_specs = [
+						(layer_light, BUFF_LIGHT, 2.0, 40.0, 0.12, "Light Roads"),
+						(layer_medium, BUFF_MEDIUM, 4.0, 60.0, 0.10, "Medium Roads"),
+						(layer_heavy, BUFF_HEAVY, 6.0, 90.0, 0.07, "Heavy Roads"),
+						(layer_rails, BUFF_RAIL, 5.0, 150.0, 0.025, "Railways"),
+					]
+					shaped_any = False
+					for lyr, half_w, feather, smooth_m, grade, nm in road_specs:
+						lines = roadwater.extract_lines(lyr, _to_px)
+						if not lines:
+							continue
+						elev_array = roadwater.apply_roads(
+							elev_array, lines, pixel_size,
+							half_width_m=half_w, feather_m=feather,
+							smooth_m=smooth_m, max_grade=grade,
+							log=lambda m, _n=nm: debug_log("  [%s] %s" % (_n, m)))
+						shaped_any = True
+					used_profile_roads = shaped_any
+				except Exception as _rw_exc:
+					debug_log("Per-feature road shaping failed (%s); using raster ribbons." % _rw_exc)
+					used_profile_roads = False
+
+				if not used_profile_roads:
+					elev_array = apply_flat_ribbon(elev_array, mask_light_c, mask_light_b, sigma=1.0, falloff_dist=2.0, name="Light Roads")
+					elev_array = apply_flat_ribbon(elev_array, mask_medium_c, mask_medium_b, sigma=2.5, falloff_dist=4.0, name="Medium Roads")
+					elev_array = apply_flat_ribbon(elev_array, mask_heavy_c, mask_heavy_b, sigma=4.0, falloff_dist=6.0, name="Heavy Roads")
+					elev_array = apply_flat_ribbon(elev_array, mask_rails_c, mask_rails_b, sigma=3.5, falloff_dist=5.0, name="Railways")
 
 				# =========================================================
 				# FULL GEOMORPH RIVER SYSTEM
@@ -1884,7 +1921,38 @@ class TerrainEngineer:
 
 				step_callback(84, "Geomorph river processing...")
 
-				if np.any(mask_water_b):
+				# Profile-based carving gives the bed a monotonic descent, so water
+				# runs instead of pooling in a chain of ponds. Same fallback rule as
+				# the roads: any failure drops through to the geomorph pass below.
+				used_profile_rivers = False
+				try:
+					import roadwater as _rw
+					_gt = ds_elev.GetGeoTransform()
+					_ix = 1.0 / _gt[1] if _gt[1] else 0.0
+					_iy = 1.0 / _gt[5] if _gt[5] else 0.0
+
+					def _wpx(mx, my):
+						return ((my - _gt[3]) * _iy, (mx - _gt[0]) * _ix)
+
+					_wlines = _rw.extract_lines(layer_water_lines, _wpx)
+					if _wlines:
+						elev_array = _rw.apply_rivers(
+							elev_array, _wlines, pixel_size,
+							half_width_m=max(2.0, BUFF_WATER * 0.5),
+							feather_m=max(3.0, BUFF_WATER),
+							depth_m=1.5,
+							log=lambda m: debug_log("  [Rivers] %s" % m))
+						used_profile_rivers = True
+				except Exception as _rv_exc:
+					debug_log("Per-feature river carving failed (%s); using geomorph pass." % _rv_exc)
+					used_profile_rivers = False
+
+				if used_profile_rivers:
+					debug_log("Rivers carved from profiles; skipping geomorph pass.")
+					if np.any(mask_water_b):
+						_road_mask = mask_light_b | mask_medium_b | mask_heavy_b | mask_rails_b
+						self.protect_mask = _road_mask | mask_water_b
+				elif np.any(mask_water_b):
 
 					if not np.any(mask_water_c):
 						mask_water_c = mask_water_b
@@ -2592,8 +2660,14 @@ class ArmaExportPlugin:
 					runner = (_erosion.simulate_parallel
 							  if erosion_settings.get('parallel')
 							  else _erosion.simulate)
+					_px = None
+					try:
+						_px = float(size_w) / float(resolution_w)
+					except Exception:
+						_px = None
 					eroded = runner(elev_f, params, protect_mask=protect,
-									progress=_erosion_step, seed=1)
+									progress=_erosion_step, seed=1,
+									pixel_size=_px)
 
 					if np.isfinite(eroded).all():
 						elevation_resampled = eroded.astype(
