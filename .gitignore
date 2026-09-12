@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# scratch/debug scripts
+_*.py
