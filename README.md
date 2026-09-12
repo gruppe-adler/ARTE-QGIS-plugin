@@ -1,141 +1,97 @@
-# ARTE+ — erosion fork
+# ARTE+ - Arma Reforger Terrain Exporter (QGIS Plugin)
 
-Fork of [Rendszerguru/ARTE-QGIS-plugin](https://github.com/Rendszerguru/ARTE-QGIS-plugin)
-(ARTE 1.1.0 by Icebird, MIT) adding hydraulic erosion, per-feature road and river
-shaping, and previews for both. Upstream behaviour is preserved: every new pass
-falls back to the original code if anything fails.
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/Rendszerguru/ARTE-QGIS-plugin/releases/latest)
+[![QGIS](https://img.shields.io/badge/QGIS-3.x-green.svg)](https://qgis.org/)
+[![Engine](https://img.shields.io/badge/Engine-Enfusion%20(Arma%20Reforger)-orange.svg)](https://reforger.armaplatform.com/)
+[![License](https://img.shields.io/badge/license-Free-lightgrey.svg)](#-license)
 
-## Why
+> **Fork of [Rendszerguru/ARTE-QGIS-plugin](https://github.com/Rendszerguru/ARTE-QGIS-plugin)** by Icebird (MIT).
+> Adds hydraulic erosion, per-feature road and river shaping, live previews, and a NoData fix - see [**What this fork adds**](#-what-this-fork-adds).
+> Everything below is upstream's and still applies; each new pass falls back to the original code if it fails.
 
-A 2 km export at 8192 px is 0.26 m/px, but AW3D30 is 30 m/px. About 119 of every
-120 pixels are interpolation, so the terrain arrives smooth and featureless. These
-additions put plausible detail back and fix defects in the existing shaping.
+**ARTE** is an advanced QGIS plugin designed for Arma Reforger terrain creators. It provides a streamlined workflow to extract high-resolution satellite imagery, process digital elevation models (DEM), apply OSM-based **Terrain Engineering**, and **automatically generate Enfusion-ready import parameters**.
 
-## Using it
+<img width="751" height="768" alt="arte" src="https://github.com/user-attachments/assets/d270fdb4-6b5d-4630-a473-c4f5f08c0f96" />
 
-The dialog has two export buttons, so it is always obvious which you are getting:
+## ✨ Key Features
+* **Interactive Map Selection:** Visually draw, move, and resize your terrain boundaries directly on the QGIS map canvas with aspect-ratio locking.
+* **Flexible & Expandable Elevation Sources:**
+    * **Custom Source Manager (New ✨):** Add, edit, and remove your own terrain data sources and custom download links directly through the plugin interface.
+    * **AWS Terrarium:** 30m global resolution database, **no API key required**.
+    * **Mapbox Terrain-RGB:** Ideal for high-fidelity global elevation data, **requires Mapbox API key**.
+    * **OpenTopography Datasets:** Gives access to premium LiDAR, COP30, AW3D30, and EU_DTM data, **requires OpenTopography API key**. *OpenTopography COP30 is highly recommended as the most optimal option.*
+    * *Note: Both Mapbox and OpenTopography require a free API key to access their servers. You can easily generate your personal tokens by creating a free account on their official websites and pasting them directly into the plugin interface.*
+* **OSM Terrain Engineering:** Automatically flattens heightmaps under roads/railways and smooths riverbeds using real-time OpenStreetMap data.
+* **Enfusion-Ready Export:** Automatically calculates the exact `Grid cell size` and `Height scale` parameters required for the Arma Reforger Workbench.
+* **Flexible Formats:** Export heightmaps as 16-bit PNG, Esri ASCII Grid (.asc), or raw Float32 GeoTIFF.
 
-- **Export (no erosion)** — heightmap, satmap and OSM road/river shaping. This is
-  the file you tune erosion against.
-- **Export with erosion** — the same, then the erosion pass. Disabled until a
-  heightmap exists in the output directory, because erosion runs *on* an exported
-  heightmap and has nothing to work from before that. Its tooltip tells you which
-  state it is in.
+## 🛠️ OSM Terrain Engineering
+When enabled, the plugin uses OpenStreetMap vector data to guide terrain modification of raw DEM data for Enfusion workflow preparation:
 
-Two **Preview / Tune** buttons let you see what a setting does before committing
-to a multi-minute run: one for erosion, one for road and river shaping. The
-shaping preview also plots a road cross-section and a river long-profile, because
-a 7 m road is two pixels wide on a 2 km map and the defects that matter — a
-canted carriageway, a pooling riverbed — are invisible from above.
+* **Smart OSM Filtering:** Fetches data from Overpass API (with fallback endpoints) and filters roads, rails, and water features, excluding bridges and tunnels.
+* **Dynamic Road & Lane Widths:** Parses OSM tags (where available) such as width and lanes to estimate corridor widths for buffering and rasterization.
+* **Pixel-Aware Embankments:** Uses buffer scaling and distance-based falloff that adapts to raster resolution (pixel size) to avoid overly sharp or blocky transitions.
+* **Dual-Mask Water Processing:** Combines water line and polygon data into raster masks and applies smoothing and morphological cleanup to improve coastline continuity and reduce artifacts.
+* **Riverbed Shaping:** Modifies terrain under water features using DEM-derived slope information combined with smoothing and distance falloff, applying a simplified depth offset for game-ready river profiles rather than true hydrological modeling.
+* **Built-in Flood Protection:** Ensures roads and railways are not lowered below nearby water levels by applying elevation constraints during terrain modification.
+* **Visual Audit Logs:** Outputs a real-time `engineer_debug_[timestamp].txt` log and a `heightmap_diff_[timestamp].tif` file showing terrain modifications for debugging and QA.
 
-Long stages report progress ("Shaping Heavy Roads (3/5)…", "Carving rivers
-(4/9)…", "Eroding: 6 of 9 tiles done"), and Cancel works throughout. Previously
-the window simply stopped responding for tens of seconds, which is
-indistinguishable from a crash.
+### 📊 Terrain Engineering Comparison
+![Terrain Engineering Comparison](https://github.com/user-attachments/assets/93152eba-9bb0-40a6-87fb-57f6740777dd)
 
-**Let one export finish before starting another.** There is no guard against
-concurrent runs, and two erosion passes at once will fight over your CPU cores.
+## 🚀 Installation
+1. Download `ARTE-QGIS-plugin.zip` from [Releases](https://github.com/Rendszerguru/ARTE-QGIS-plugin/releases/latest).
+2. Open QGIS and navigate to **Plugins** -> **Manage and Install Plugins...**
+3. Select the **Install from ZIP** tab, browse for the `.zip` file and click **Install Plugin**.
+4. *Note: ARTE automatically registers its own update repository for seamless future updates.*
 
-## What is new
+## 🛠️ Quick Usage Guide
+1. Click the **ARTE icon** in the toolbar or find it under the `Arma Tools (ARTE)` menu.
+2. Click **1. Load Satellite Preview** to center the map.
+3. Click **2. Select Extent on Map**, drag the red bounding box, and press `ENTER` or `Right-Click` when finished.
+4. *(Optional)* Use the **Source Manager** to set up custom terrain data providers.
+5. Set resolutions, select your Elevation Data Source, and click **OK**.
+6. Open `enfusion_import.txt` and copy the calculated scale values directly into your Arma Reforger World Editor!
 
-### Hydraulic erosion (`erosion.py`)
+## ➕ What this fork adds
 
-Vectorised numpy port of the droplet method from Beyer's thesis, the algorithm
-used by [erodr](https://github.com/henrikglass/erodr) (MIT). Ported rather than
-shelled out to because QGIS ships no C toolchain.
+A 2 km export at 8192 px is 0.26 m/px, but AW3D30 is 30 m/px — about 119 of every 120 pixels are interpolation, so terrain arrives smooth and featureless. These additions put plausible detail back and fix defects in the existing shaping. All figures measured on a real 8192² export.
 
-- **Presets** subtle / moderate / strong, scaled per megapixel so a preset means
-  the same at any export resolution.
-- **Preview** with a draggable before/after wipe over a hillshade.
-- **Parallel**: tiles across processes, measured **5.1x on 11 workers**
-  (2048², 75 s → 14.7 s). A full 8192² export is about 4 minutes.
-- **Protects** roads and riverbeds already shaped by the terrain engineer.
+### 🌊 Hydraulic Erosion
+* **Droplet simulation** (numpy port of [erodr](https://github.com/henrikglass/erodr), MIT) carving drainage channels and gullies the source DEM cannot resolve.
+* **Presets** subtle / moderate / strong, scaled per megapixel so a preset means the same at any resolution.
+* **Parallel:** tiled across CPU cores, **5.1x on 11 workers**. A full 8192² pass is ~4 minutes.
+* **Protects** roads and riverbeds already shaped by Terrain Engineering.
 
-### Road and river shaping (`roadwater.py`)
-
-Upstream flattens roads by taking each pixel's nearest centreline elevation and
-running a 2-D gaussian over the raster. A gaussian does not know where the road
-goes, so it mixes in terrain from either side.
-
-This shapes each feature along its own length: sample a profile down the polyline,
-smooth and grade-cap it, then interpolate back across the corridor at each pixel's
-perpendicular foot.
+### 🛣️ Better Road & River Shaping
+Upstream flattens roads with a 2-D gaussian over the raster, which does not know where the road goes and mixes in terrain from both sides. This fork shapes each feature along its own length — sample a profile down the polyline, smooth and grade-cap it, then write it back across the corridor.
 
 | | upstream | this fork |
 |---|---|---|
-| Cant across carriageway (Bamiyan) | 2.345 m | **0.024 m** |
-| Cant across carriageway (synthetic 25% slope) | 0.774 m | **0.053 m** |
+| Cant across carriageway | 2.345 m | **0.024 m** |
 | River steps running against flow | 422 | **112** |
 
-Rivers get a monotonically descending bed, bounded so it cannot trench through
-high ground — an unbounded running minimum flattened 68% of a test profile and
-cut 160 m deep, producing a canal rather than a river.
+Rivers get a monotonically descending bed, bounded so it cannot trench through high ground.
 
-### Faster exports
+### 🔍 Live Previews
+Two **Preview / Tune** dialogs show what a setting does before committing to a multi-minute run — one for erosion, one for shaping. The shaping preview plots a road cross-section and river long-profile, because a 7 m road is two pixels wide on a 2 km map and a canted carriageway or pooling riverbed is invisible from above.
 
-The terrain-engineer stage went from **291 s to 64 s** on a real 8192² export:
+### ⚡ Faster Exports
+Terrain Engineering went from **291 s to 64 s** (rivers 108 s → 7 s, heavy roads 46 s → 6 s). Shaping also used to **crash QGIS** at full resolution — it compared every pixel in a road's bounding box against every point along it, a 209 GiB allocation for a road spanning the map. A distance transform does the same job in one bounded pass.
 
-| | before | after |
-|---|---|---|
-| Rivers | 108 s | **7 s** |
-| Heavy roads | 46 s | **6 s** |
-| Light / medium roads | 46 / 45 s | **10 / 10 s** |
+### 🧹 NoData Border Fix
+Where the DEM source does not quite cover the requested area, GDAL fills the shortfall with 0 and nothing records that those pixels were never real. A "sea" of 0 m terrain then sat against ground at ~2465 m, so the 16-bit heightmap had to span 2921 m instead of the real 478 m of relief — squeezing every actual feature into a sixth of the available precision, and writing a wrong height scale into the import file. Uncovered pixels are now marked and filled by continuing the nearest real terrain outward, before road and river shaping runs.
 
-Rivers collapsed because the per-feature path replaces a 13-gaussian raster pass
-entirely. Also removed: a sleep-poll after each of the twelve OSM mask
-rasterisations that waited on a file already written (up to 6 s each with the GUI
-frozen), and morphology that ran on empty water masks (10.6 s of work on an
-all-zero array).
+### 🎛️ Clearer Export Flow
+* Two buttons — **Export (no erosion)** and **Export with erosion** — so it is never ambiguous which you are getting. The erosion button stays disabled until a heightmap exists to erode.
+* Long stages report progress and stay cancellable, instead of the window freezing for tens of seconds.
+* *Let one export finish before starting another — two erosion passes will fight over your CPU cores.*
 
-Shaping also used to **crash QGIS** at full resolution. It compared every pixel
-in a road's bounding box against every point along it, which for a road spanning
-an 8192 px export is a 209 GiB allocation. A distance transform does the same job
-in one bounded pass.
+---
 
-### NoData border fix
+### 📄 **License**
+This project is licensed under the MIT License - free to use, modify, and distribute.
 
-Where the DEM source does not quite cover the area you asked for, GDAL fills the
-shortfall with 0. Nothing recorded that those pixels were never real, so a sea
-of "0 m terrain" sat against ground at ~2465 m. The 16-bit heightmap then had to
-span 2921 m instead of the real 478 m of relief, squeezing every actual feature
-into about a sixth of the available precision — and writing a wrong height scale
-into the Enfusion import file.
-
-OpenTopography serves 30 m cells and snaps to them, so a request can come back a
-fraction of a cell short. Measured bands on a 2200 m export: 9.7 m, 29.3 m and
-12.4 m on three sides, all under one source cell.
-
-The export now tells GDAL to mark uncovered pixels instead of silently zeroing
-them, and fills them by continuing the nearest real terrain outward — so your
-heightmap keeps exactly the extent you asked for. Filling happens before road and
-river shaping, so that shaping can no longer blur void pixels into real ground.
-
-Earlier attempts to spot the border by statistics are gone. They cannot work: on
-a coastal map the fill value and real sea level are the same number, and one such
-attempt flagged 1.67 million pixels of genuine low ground as void.
-
-## Install
-
-Copy this directory to your QGIS plugins folder:
-
-    %APPDATA%/QGIS/QGIS3/profiles/default/python/plugins/ARTE     (QGIS 3)
-    %APPDATA%/QGIS/QGIS4/profiles/default/python/plugins/ARTE     (QGIS 4)
-
-Requires numpy and scipy, both bundled with QGIS. Loads under Qt5 and Qt6.
-Restart QGIS after copying — it loads plugin code once at startup.
-
-## Notes
-
-- Previews run downsampled and single-threaded, so they show the character of a
-  setting rather than its exact result. A 7 m road is sub-pixel at preview scale,
-  so it will always look like a thin thread there however wide you set it.
-- Erosion is bounded to a band around the input heightmap. Without that it runs
-  away: measured relief growing 489 m → 3950 m at 100k particles, because
-  thousands of droplets revisit the same pixel and their edits compound.
-- `test_installed.py` runs 22 checks against the *installed* copy, so it catches a
-  stale or partial install as well as regressions. Run it with QGIS's bundled
-  Python, not the system one — only QGIS ships scipy.
-
-## Licence
-
-MIT, as upstream.
+### Author 🧑‍💻
+Created by **Icebird** - Copyright (c) 2026.
+Fork additions by [gruppe-adler](https://github.com/gruppe-adler).
