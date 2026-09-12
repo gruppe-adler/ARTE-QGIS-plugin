@@ -40,7 +40,19 @@ def hillshade(z, azimuth=315.0, altitude=45.0, vert_exag=3.0, ref=None):
     """
     z = np.nan_to_num(z.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     src = z if ref is None else np.nan_to_num(ref.astype(np.float32))
-    spread = float(np.percentile(np.abs(np.gradient(src)[0]), 99))
+
+    # Derive the contrast stretch from the interior only.
+    #
+    # An unfilled NoData border sits ~2465 m below the terrain, which is a
+    # cliff at the frame edge. Measured on a real export it pushed the p99
+    # slope from 5.4 to 248: the stretch is then set by the border rather than
+    # the landscape, and identical terrain rendered at a hillshade contrast of
+    # 13.5 instead of 44.8 -- a flat grey sheet with the relief still in the
+    # data. Trimming a margin before measuring keeps the picture honest even
+    # when the export has a void edge.
+    margin = max(2, int(min(src.shape) * 0.03))
+    inner = src[margin:-margin, margin:-margin] if min(src.shape) > 4 * margin else src
+    spread = float(np.percentile(np.abs(np.gradient(inner)[0]), 99))
     if not np.isfinite(spread) or spread <= 0:
         spread = 1.0
 

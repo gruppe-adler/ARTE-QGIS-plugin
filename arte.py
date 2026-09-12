@@ -125,6 +125,13 @@ def _find_heightmap(directory):
 	the terrain engineer changed. It sorts after ``heightmap_<stamp>.png`` in a
 	reverse listing, so a naive "first match" picks the diff and the preview
 	shows roads floating on a blank field instead of terrain.
+
+	The ``.tif`` is an *intermediate*: NoData is not filled until step 85, which
+	runs after the terrain engineer. An export that is cancelled or killed in
+	between leaves a .tif whose voids are still ~0 m against terrain at ~2465 m.
+	That 2465 m cliff around all four edges dominates the hillshade contrast
+	stretch and the preview renders as a flat grey sheet. So prefer the finished
+	.png, and reject any candidate that still carries a NoData border.
 	"""
 	import os
 	if not directory or not os.path.isdir(directory):
@@ -140,13 +147,51 @@ def _find_heightmap(directory):
 			continue
 		path = os.path.join(directory, name)
 		try:
-			cands.append((os.path.getmtime(path), path))
+			# A finished .png outranks any .tif of the same vintage.
+			cands.append((0 if low.endswith(".png") else 1,
+						  -os.path.getmtime(path), path))
 		except OSError:
 			continue
 	if not cands:
 		return None
 	cands.sort()
-	return cands[-1][1]
+
+	for _kind, _age, path in cands:
+		if not _has_nodata_border(path):
+			return path
+	# Everything looks unfinished; hand back the best-ranked one anyway so the
+	# caller can still show something rather than failing outright.
+	return cands[0][2]
+
+
+def _has_nodata_border(path, threshold=0.005):
+	"""True if a raster still has unfilled voids along its edges.
+
+	Cheap check: read a coarse overview rather than the full 8192x8192 grid.
+	"""
+	try:
+		import numpy as _np
+		from osgeo import gdal as _gdal
+		ds = _gdal.Open(path)
+		if ds is None:
+			return False
+		band = ds.GetRasterBand(1)
+		step = max(1, min(band.XSize, band.YSize) // 512)
+		a = band.ReadAsArray(
+			buf_xsize=max(1, band.XSize // step),
+			buf_ysize=max(1, band.YSize // step)).astype('float32')
+		ds = None
+		if a.size == 0:
+			return False
+		hi = float(_np.percentile(a, 75))
+		if hi <= 0:
+			return False
+		# Voids sit far below the working elevation range.
+		void = a < (hi * 0.5)
+		edges = _np.concatenate([void[0], void[-1], void[:, 0], void[:, -1]])
+		return bool(edges.mean() > threshold)
+	except Exception:
+		return False
 
 
 def _arte_import(name):
@@ -2839,7 +2884,49 @@ class ArmaExportPlugin:
 			ds_out = gdal.Open(output_tif, gdal.GA_Update)
 			elevation_resampled = ds_out.GetRasterBand(1).ReadAsArray()
 
+			# `> -10000` only catches sentinel NoData such as -32768. Voids can
+			# also arrive at ordinary-looking elevations: this export produced a
+			# 2.4% border sitting near 0 m against terrain at ~2465 m. Those
+			# passed the sentinel test, so the 16-bit PNG had to span 2921 m
+			# instead of the real 489 m of relief -- squeezing every real
+			# feature into the top 17% of the range, which is what makes the
+			# heightmap look flat in preview and in the editor.
+			#
+			# Detect them from the terrain's own distribution, but only trust
+			# the verdict where voids actually occur: against the outside edge.
+			# A blanket low-elevation cut is not safe -- tried at 4x IQR it
+			# flagged 1.67 M pixels of genuine low ground on this very map.
 			valid_mask = elevation_resampled > -10000.0
+			if np.any(valid_mask):
+				_ref = elevation_resampled[valid_mask]
+				_p01 = float(np.percentile(_ref, 1))
+				_p50 = float(np.percentile(_ref, 50))
+				_drop = _p50 - _p01
+				if _drop > 200.0:
+					# The low tail is far below the bulk of the terrain, which
+					# real relief does not do at this scale. Flood-fill the
+					# suspect band inward from the border so only edge-connected
+					# voids are removed and interior valleys are left alone.
+					try:
+						from scipy.ndimage import label as _label
+						_suspect = elevation_resampled < (_p01 + _drop * 0.25)
+						if _suspect.any():
+							_lab, _n = _label(_suspect)
+							_edge = np.concatenate([
+								_lab[0], _lab[-1], _lab[:, 0], _lab[:, -1]])
+							_edge_ids = np.unique(_edge[_edge > 0])
+							if _edge_ids.size:
+								_border_void = np.isin(_lab, _edge_ids)
+								valid_mask &= ~_border_void
+								QgsMessageLog.logMessage(
+									"Detected %d edge-connected void pixels near %.0f m "
+									"(terrain median %.0f m)" % (
+										int(_border_void.sum()), _p01, _p50),
+									"ArmaTerrainExport", Qgis.Info)
+					except Exception as _void_exc:
+						QgsMessageLog.logMessage(
+							"Border void detection skipped: %s" % _void_exc,
+							"ArmaTerrainExport", Qgis.Warning)
 			if np.any(valid_mask):
 				min_val = float(np.min(elevation_resampled[valid_mask]))
 				max_val = float(np.max(elevation_resampled[valid_mask]))
