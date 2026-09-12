@@ -955,7 +955,10 @@ class CombinedArmaInputDialog(QDialog):
 		layout_source.addRow("Terrain Engineering:", self.cb_burn_terrain)
 		layout_source.addRow("Engineering Multiplier:", self.sb_multiplier)
 
-		self.cb_erosion = QCheckBox("Hydraulic Erosion (adds detail a coarse DEM cannot resolve)")
+		# Kept as the carrier of the erosion preset, but the export buttons decide
+		# whether erosion runs -- a checkbox and a button that both claim to
+		# control it is exactly the ambiguity this UI had.
+		self.cb_erosion = QCheckBox("Use erosion when pressing 'Export with erosion'")
 		self.cb_erosion.setChecked(saved_erosion)
 		self.cb_erosion.setToolTip(
 			"Simulates water erosion to add drainage channels and gully detail.\n"
@@ -1015,11 +1018,26 @@ class CombinedArmaInputDialog(QDialog):
 			cancel_btn = QDialogButtonBox.Cancel
 
 		buttons = QDialogButtonBox(ok_btn | cancel_btn)
-		buttons.accepted.connect(self.save_and_accept)
 		buttons.rejected.connect(self.save_and_reject)
 
-		export_btn = buttons.button(ok_btn)
-		export_btn.setText("Export")
+		# Two explicit export buttons rather than one Export plus a checkbox.
+		# Whether erosion was going to run was previously only readable from a
+		# tickbox halfway up the dialog, and an export with erosion takes
+		# several minutes longer -- worth making unmistakable at the moment of
+		# committing to it.
+		self.btn_export_plain = buttons.button(ok_btn)
+		self.btn_export_plain.setText("Export (no erosion)")
+		self.btn_export_plain.setToolTip(
+			"Heightmap, satmap and OSM road/river shaping.\n"
+			"This is the file you tune erosion against.")
+		self.btn_export_plain.clicked.connect(self._export_without_erosion)
+
+		self.btn_export_eroded = buttons.addButton(
+			"Export with erosion", QDialogButtonBox.ButtonRole.AcceptRole
+			if hasattr(QDialogButtonBox, 'ButtonRole')
+			else QDialogButtonBox.AcceptRole)
+		self.btn_export_eroded.clicked.connect(self._export_with_erosion)
+
 		main_layout.addWidget(buttons)
 
 		self.setLayout(main_layout)
@@ -1028,6 +1046,11 @@ class CombinedArmaInputDialog(QDialog):
 		if 0 <= saved_source < len(self.sources_list):
 			self.cb_source.setCurrentIndex(saved_source)
 
+		self.export_mode = 'plain'
+		self.le_path.textChanged.connect(lambda _=None: self._sync_export_buttons())
+		self.cb_erosion.toggled.connect(lambda _=None: self._sync_export_buttons())
+		self.cmb_erosion.currentTextChanged.connect(lambda _=None: self._sync_export_buttons())
+		self._sync_export_buttons()
 		self.cb_source.currentIndexChanged.connect(self.on_source_changed)
 		self.on_source_changed(self.cb_source.currentIndex())
 		self._update_all_from_size()
@@ -1477,6 +1500,7 @@ class CombinedArmaInputDialog(QDialog):
 			if accepted:
 				self.erosion_settings = dlg.result_settings()
 				self.cb_erosion.setChecked(True)
+				self._sync_export_buttons()
 		except Exception as exc:
 			QMessageBox.warning(self, "Erosion Preview", "Preview failed: %s" % exc)
 
@@ -1547,6 +1571,44 @@ class CombinedArmaInputDialog(QDialog):
 			return lines
 		except Exception:
 			return []
+
+	def _export_without_erosion(self):
+		"""Export the base terrain. Erosion is skipped regardless of the tickbox."""
+		self.export_mode = 'plain'
+		self.save_and_accept()
+
+	def _export_with_erosion(self):
+		"""Export and then erode, using the tuned or preset settings."""
+		self.export_mode = 'eroded'
+		self.save_and_accept()
+
+	def _sync_export_buttons(self):
+		"""Enable the erosion export only once there is something to erode.
+
+		Erosion runs on the exported heightmap, so it needs one to exist. With
+		no output yet the button is disabled and says why, rather than starting
+		a long run that has nothing to work from.
+		"""
+		btn = getattr(self, 'btn_export_eroded', None)
+		if btn is None:
+			return
+		src = _find_heightmap(self.le_path.text().strip())
+		tuned = getattr(self, 'erosion_settings', None)
+		if not src:
+			btn.setEnabled(False)
+			btn.setToolTip(
+				"No heightmap in the output directory yet.\n"
+				"Run 'Export (no erosion)' first, then tune erosion against it.")
+			return
+		btn.setEnabled(True)
+		if tuned:
+			btn.setToolTip("Re-export and apply the erosion settings you tuned "
+						   "in the preview.")
+		else:
+			btn.setToolTip(
+				"Re-export and apply the '%s' erosion preset.\n"
+				"Use Preview / Tune first if you want to see it before committing."
+				% self.cmb_erosion.currentText())
 
 	def open_roadwater_preview(self):
 		"""Preview road/river shaping against the last exported heightmap.
@@ -2520,8 +2582,15 @@ class ArmaExportPlugin:
 
 		# Erosion settings: an explicit Preview/Tune session wins, otherwise
 		# fall back to the preset chosen in the combo.
+		# The button the user pressed is the authority: "Export (no erosion)"
+		# never erodes, whatever the tickbox says.
 		self._erosion_settings = None
-		if getattr(dialog, 'cb_erosion', None) is not None and dialog.cb_erosion.isChecked():
+		_mode = getattr(dialog, 'export_mode', 'plain')
+		if _mode != 'eroded':
+			QgsMessageLog.logMessage(
+				"Export without erosion (base terrain + OSM shaping).",
+				"ArmaTerrainExport", Qgis.Info)
+		elif getattr(dialog, 'cb_erosion', None) is not None:
 			tuned = getattr(dialog, 'erosion_settings', None)
 			if tuned:
 				self._erosion_settings = tuned
