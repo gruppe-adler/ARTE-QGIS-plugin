@@ -88,27 +88,42 @@ def smooth_profile(prof, pixel_size, smooth_m=60.0, max_grade=None):
     return out
 
 
-def monotonic_downhill(prof, pixel_size, min_drop=0.0005):
-    """Force a profile to never run uphill.
+def monotonic_downhill(prof, pixel_size, min_drop=0.0005, max_cut=None):
+    """Force a profile to never run uphill, without bulldozing the terrain.
 
-    A river that climbs is the single most visible artefact in a carved
-    waterway: water pools in the dips and the channel reads as a chain of
-    ponds. OSM waterway direction is unreliable, so the descent direction is
-    taken from whichever end sits higher.
+    A river that climbs is the most visible artefact in a carved waterway:
+    water pools in the dips and the channel reads as a chain of ponds. The
+    naive running-minimum fix is worse, though. Where a polyline genuinely
+    rises -- an OSM way crossing a ridge, or a tributary digitised toward its
+    source -- it drags the whole downstream reach to the lowest elevation
+    seen so far. Measured on a line crossing Bamiyan's ridges that flattened
+    68% of the profile, one run 1156 m long, cutting up to 160 m deep.
+
+    `max_cut` bounds how far below the original ground the bed may be pushed.
+    Where holding the descent would need a deeper cut than that, the profile
+    is allowed to rise again and a new reach begins -- which is what a real
+    drainage network does at a watershed divide.
     """
     if len(prof) < 2:
         return prof
     out = prof.astype(np.float64).copy()
-    if out[-1] > out[0]:
+    flipped = out[-1] > out[0]
+    if flipped:
         out = out[::-1]
-        flipped = True
-    else:
-        flipped = False
+    ground = out.copy()
 
     step = max(pixel_size, 1e-6) * min_drop
+    limit = None if max_cut is None else float(max_cut)
+
     for i in range(1, len(out)):
-        if out[i] >= out[i - 1] - step:
-            out[i] = out[i - 1] - step
+        target = out[i - 1] - step
+        if out[i] >= target:
+            if limit is not None and (ground[i] - target) > limit:
+                # Too deep a cut: start a fresh reach at ground level rather
+                # than trenching through the high ground.
+                out[i] = ground[i]
+            else:
+                out[i] = target
     return out[::-1] if flipped else out
 
 
@@ -248,7 +263,10 @@ def apply_rivers(z, features, pixel_size, half_width_m, feather_m,
         prof = gaussian_filter1d(prof.astype(np.float64),
                                  sigma=max(1.0, 20.0 / max(pixel_size, 1e-6) / 3.0),
                                  mode='nearest')
-        prof = monotonic_downhill(prof, pixel_size)
+        # Allow a few channel depths of cut, no more; beyond that the line is
+        # crossing high ground rather than following a valley.
+        prof = monotonic_downhill(prof, pixel_size,
+                                  max_cut=max(3.0, depth_m * 4.0))
         out, weight = stamp_profile(z, pts, prof, half_px, feather_px,
                                     out=out, weight=weight, depth=depth_m)
         done += 1
