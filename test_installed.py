@@ -23,6 +23,38 @@ src=inspect.getsource(arte.ArmaExportPlugin.execute_export)
 chk("nodata uses nearest-valid", "distance_transform_edt" in src and "nearest-valid" in src)
 chk("erosion hook present", "_erosion_settings" in src)
 
+chk("warps declare dstNodata", src.count("dstNodata") >= 2)
+chk("warp probes source nodata", "_probe_nodata" in src)
+chk("mask reads declared nodata", "GetNoDataValue" in src and "valid_mask" in src)
+chk("failed heuristic removed", "_p01" not in src and "_border_void" not in src)
+chk("voids filled before engineer", "_fill_voids_in_place" in src)
+
+# The mechanism itself, not just the presence of a string: warp a source that
+# under-covers the requested bounds and confirm the margin comes back marked.
+import tempfile, os
+from osgeo import gdal
+gdal.UseExceptions()
+_tmp = tempfile.mkdtemp()
+_src = os.path.join(_tmp, "s.tif")
+_d = gdal.GetDriverByName("GTiff").Create(_src, 100, 100, 1, gdal.GDT_Float32)
+_d.SetGeoTransform((1000.0, 10.0, 0, 2000.0, 0, -10.0))
+_d.GetRasterBand(1).WriteArray(np.full((100, 100), 2500.0, np.float32))
+_d.FlushCache(); _d = None
+_out = os.path.join(_tmp, "o.tif")
+gdal.Warp(_out, _src, width=240, height=240,
+          outputBounds=(1000.0, 800.0, 2200.0, 2000.0),
+          resampleAlg=gdal.GRA_Lanczos, outputType=gdal.GDT_Float32,
+          srcNodata=arte._probe_nodata(_src), dstNodata=arte.VOID_SENTINEL,
+          format="GTiff")
+_ds = gdal.Open(_out); _a = _ds.GetRasterBand(1).ReadAsArray(); _ds = None
+chk("uncovered margin is marked", int((_a == arte.VOID_SENTINEL).sum()) > 0,
+    "%d px" % int((_a == arte.VOID_SENTINEL).sum()))
+_n = arte._fill_voids_in_place(_out)
+_ds = gdal.Open(_out); _b = _ds.GetRasterBand(1).ReadAsArray(); _ds = None
+chk("fill removes every void", int((_b == arte.VOID_SENTINEL).sum()) == 0,
+    "filled %d" % _n)
+chk("fill restores real elevation", _b.min() > 2000.0, "min %.1f" % _b.min())
+
 eng=inspect.getsource(arte.TerrainEngineer.run)
 chk("per-feature roads wired", "used_profile_roads" in eng)
 chk("per-feature rivers wired", "used_profile_rivers" in eng)
