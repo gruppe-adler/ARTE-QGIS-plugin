@@ -876,6 +876,14 @@ class CombinedArmaInputDialog(QDialog):
 		layout_source.addRow("Erosion:", self.cb_erosion)
 		layout_source.addRow("Erosion Strength:", ero_row)
 
+		self.btn_roadwater_preview = QPushButton("Preview Roads & Rivers...")
+		self.btn_roadwater_preview.setToolTip(
+			"Inspect road cross-sections and river long profiles, and tune\n"
+			"width, blend, gradient and depth before exporting.")
+		self.btn_roadwater_preview.clicked.connect(self.open_roadwater_preview)
+		layout_source.addRow("Shaping Preview:", self.btn_roadwater_preview)
+		self.roadwater_settings = None
+
 		self.erosion_settings = None
 		main_layout.addWidget(box_source)
 
@@ -1373,6 +1381,59 @@ class CombinedArmaInputDialog(QDialog):
 				self.cb_erosion.setChecked(True)
 		except Exception as exc:
 			QMessageBox.warning(self, "Erosion Preview", "Preview failed: %s" % exc)
+
+	def open_roadwater_preview(self):
+		"""Preview road/river shaping against the last exported heightmap.
+
+		Uses OSM geometry for the current extent so the preview shapes the
+		same features the export will.
+		"""
+		from qgis.PyQt.QtWidgets import QMessageBox
+		try:
+			import numpy as _np
+			from osgeo import gdal as _gdal
+		except Exception as exc:
+			QMessageBox.warning(self, "Shaping", "Could not load GDAL/numpy: %s" % exc)
+			return
+
+		path = self.le_path.text().strip()
+		src = None
+		if path and os.path.isdir(path):
+			for name in sorted(os.listdir(path), reverse=True):
+				if name.lower().startswith("heightmap") and name.lower().endswith((".png", ".tif")):
+					src = os.path.join(path, name)
+					break
+		if not src:
+			QMessageBox.information(
+				self, "Shaping Preview",
+				"No heightmap found in the output directory yet.\n\n"
+				"Run an export once, then use this button to tune shaping.")
+			return
+
+		try:
+			ds = _gdal.Open(src)
+			arr = ds.GetRasterBand(1).ReadAsArray().astype('float32')
+			ds = None
+			pixel = float(self.sb_size_w.value()) / float(self.sb_res_hm_w.value())
+		except Exception as exc:
+			QMessageBox.warning(self, "Shaping Preview", "Could not read heightmap: %s" % exc)
+			return
+
+		# Without OSM geometry the preview still works: it demonstrates the
+		# controls on a straight line through the middle of the map.
+		h, w = arr.shape
+		roads = [_np.array([[h * 0.5, float(c)] for c in range(0, w, 8)])]
+		rivers = [_np.array([[float(r), w * 0.5] for r in range(0, h, 8)])]
+
+		try:
+			import roadwater_preview
+			dlg = roadwater_preview.RoadWaterPreviewDialog(
+				arr, roads=roads, rivers=rivers, pixel_size=pixel, parent=self)
+			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
+			if accepted:
+				self.roadwater_settings = dlg.settings()
+		except Exception as exc:
+			QMessageBox.warning(self, "Shaping Preview", "Preview failed: %s" % exc)
 
 	def browse_path(self):
 		directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")

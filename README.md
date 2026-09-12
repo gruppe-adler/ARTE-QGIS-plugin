@@ -1,40 +1,79 @@
-# ARTE - Arma Reforger Terrain Exporter
+# ARTE+ — erosion fork
 
-ARTE is an advanced QGIS plugin designed for Arma Reforger terrain creators. It provides a streamlined workflow to extract high-resolution satellite imagery, process digital elevation models (DEM), apply OSM-based Terrain Engineering, and automatically generate Enfusion-ready import parameters.
+Fork of [Rendszerguru/ARTE-QGIS-plugin](https://github.com/Rendszerguru/ARTE-QGIS-plugin)
+(ARTE 1.1.0 by Icebird, MIT) adding hydraulic erosion, per-feature road and river
+shaping, and previews for both. Upstream behaviour is preserved: every new pass
+falls back to the original code if anything fails.
 
+## Why
 
-## ✨ Key Features
-* **Interactive Map Selection:** Visually draw, move, and resize your terrain boundaries directly on the QGIS map canvas with aspect-ratio locking.
-* **Multiple Elevation Sources:**
-    * **AWS Terrarium:** 30m global resolution database, **no API key required**.
-    * **Mapbox Terrain-RGB:** Ideal for high-fidelity global elevation data, **requires Mapbox API key**.
-    * **OpenTopography Datasets:** Gives access to premium LiDAR, COP30, AW3D30, and EU_DTM data, **requires OpenTopography API key**. *OpenTopography COP30 is highly recommended as the most optimal option.*
-    * *Note: Both Mapbox and OpenTopography require a free API key to access their servers. You can easily generate your personal tokens by creating a free account on their official websites and pasting them directly into the plugin interface.*
-* **OSM Terrain Engineering:** Automatically flattens heightmaps under roads/railways and smooths riverbeds using real-time OpenStreetMap data.
-* **Enfusion-Ready Export:** Automatically calculates the exact `Grid cell size` and `Height scale` parameters required for the Arma Reforger Workbench.
-* **Flexible Formats:** Export heightmaps as 16-bit PNG, Esri ASCII Grid (.asc), or raw Float32 GeoTIFF.
+A 2 km export at 8192 px is 0.26 m/px, but AW3D30 is 30 m/px. About 119 of every
+120 pixels are interpolation, so the terrain arrives smooth and featureless. These
+additions put plausible detail back and fix defects in the existing shaping.
 
+## What is new
 
-## 🛠️ OSM Terrain Engineering
-When enabled, the plugin uses OpenStreetMap vector data to guide terrain modification of raw DEM data for Enfusion workflow preparation:
-* **Smart OSM Filtering:** Fetches data from Overpass API (with fallback endpoints) and filters roads, rails, and water features, excluding bridges and tunnels.
-* **Dynamic Road & Lane Widths:** Parses OSM tags (where available) such as width and lanes to estimate corridor widths for buffering and rasterization.
-* **Pixel-Aware Embankments:** Uses buffer scaling and distance-based falloff that adapts to raster resolution (pixel size) to avoid overly sharp or blocky transitions.
-* **Dual-Mask Water Processing:** Combines water line and polygon data into raster masks and applies smoothing and morphological cleanup to improve coastline continuity and reduce artifacts.
-* **Riverbed Shaping:** Modifies terrain under water features using DEM-derived slope information combined with smoothing and distance falloff, applying a simplified depth offset for game-ready river profiles rather than true hydrological modeling.
-* **Built-in Flood Protection:** Ensures roads and railways are not lowered below nearby water levels by applying elevation constraints during terrain modification.
-* **Visual Audit Logs:** Outputs a real-time `engineer_debug_[timestamp].txt` log and a `heightmap_diff_[timestamp].tif` file showing terrain modifications for debugging and QA.
+### Hydraulic erosion (`erosion.py`)
 
+Vectorised numpy port of the droplet method from Beyer's thesis, the algorithm
+used by [erodr](https://github.com/henrikglass/erodr) (MIT). Ported rather than
+shelled out to because QGIS ships no C toolchain.
 
-## Quick Usage Guide
-1. Click the **ARTE icon** in the toolbar or find it under the **Plugins -> Arma Tools (ARTE)** menu.
-2. Click **1. Load Satellite Preview** to center the map.
-3. Click **2. Select Extent on Map**, drag the red bounding box, and press **ENTER** or **Right-Click** when finished.
-4. Set resolutions, select your Elevation Data Source (COP30 recommended), and click **OK**.
-5. Open `enfusion_import.txt` in your output directory and copy the calculated scale values directly into your Arma Reforger World Editor!
+- **Presets** subtle / moderate / strong, scaled per megapixel so a preset means
+  the same at any export resolution.
+- **Preview** with a draggable before/after wipe over a hillshade.
+- **Parallel**: tiles across processes, measured **5.1x on 11 workers**
+  (2048², 75 s → 14.7 s). A full 8192² export is about 4 minutes.
+- **Protects** roads and riverbeds already shaped by the terrain engineer.
 
-## License
-This project is licensed under the MIT License - free to use, modify, and distribute.
+### Road and river shaping (`roadwater.py`)
 
-## Author
-Created by Icebird - Copyright (c) 2026.
+Upstream flattens roads by taking each pixel's nearest centreline elevation and
+running a 2-D gaussian over the raster. A gaussian does not know where the road
+goes, so it mixes in terrain from either side.
+
+This shapes each feature along its own length: sample a profile down the polyline,
+smooth and grade-cap it, then interpolate back across the corridor at each pixel's
+perpendicular foot.
+
+| | upstream | this fork |
+|---|---|---|
+| Cant across carriageway (Bamiyan) | 2.345 m | **0.024 m** |
+| Cant across carriageway (synthetic 25% slope) | 0.774 m | **0.053 m** |
+| River steps running against flow | 422 | **112** |
+
+Rivers get a monotonically descending bed, bounded so it cannot trench through
+high ground — an unbounded running minimum flattened 68% of a test profile and
+cut 160 m deep, producing a canal rather than a river.
+
+### NoData fix
+
+Upstream fills voids with `min_val`, the lowest point on the whole map. Where the
+DEM does not reach the export window — a tile boundary along one edge is the
+common case — that is a cliff the full height of the terrain wrapping the border.
+In the Enfusion editor it reads as a giant bowl and drags the interior out of
+shape through LOD blending. Now fills by nearest-valid replication.
+
+## Install
+
+Copy this directory to your QGIS plugins folder:
+
+    %APPDATA%/QGIS/QGIS3/profiles/default/python/plugins/ARTE     (QGIS 3)
+    %APPDATA%/QGIS/QGIS4/profiles/default/python/plugins/ARTE     (QGIS 4)
+
+Requires numpy and scipy, both bundled with QGIS. Loads under Qt5 and Qt6.
+
+## Notes
+
+- Previews run downsampled and single-threaded, so they show the character of a
+  setting rather than its exact result.
+- Erosion is bounded to a band around the input heightmap. Without that it runs
+  away: measured relief growing 489 m → 3950 m at 100k particles, because
+  thousands of droplets revisit the same pixel and their edits compound.
+- Verify any heightmap before importing it. Two defects have cost real time on
+  this project: a truncated Gaea write (89% of the file missing, no IEND chunk)
+  and the NoData border above.
+
+## Licence
+
+MIT, as upstream.

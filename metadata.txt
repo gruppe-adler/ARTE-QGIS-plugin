@@ -1,9 +1,9 @@
 [general]
-name=ARTE - Arma Reforger Terrain Exporter
+name=ARTE+ - Arma Reforger Terrain Exporter (erosion fork)
 description=Export satellite imagery and heightmaps for Arma Reforger terrains.
 about=ARTE is an advanced QGIS plugin designed for Arma Reforger terrain creators. It provides a streamlined workflow to extract high-resolution satellite imagery, process digital elevation models (DEM), apply OSM-based terrain engineering (road flattening and river carving), and automatically generate Enfusion-ready import parameters.
-version=1.1.0
-author=Icebird
+version=1.2.0-fork
+author=Icebird; erosion/shaping fork by nomisum
 email=none
 
 homepage=https://github.com/Rendszerguru/ARTE-QGIS-plugin
@@ -13,5 +13,5 @@ tracker=https://github.com/Rendszerguru/ARTE-QGIS-plugin/issues
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 category=Plugins
-tags=arma, reforger, enfusion, terrain, satmap, heightmap, export
+tags=arma, reforger, enfusion, terrain, satmap, heightmap, export, erosion, hydraulic
 icon=icon.png
