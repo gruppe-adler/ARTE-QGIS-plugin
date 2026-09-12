@@ -642,6 +642,8 @@ class CombinedArmaInputDialog(QDialog):
 		saved_path = settings.value("ArmaReforgerTools/output_path", "C:/QGIS/ArmaTerrainExport")
 		saved_burn = settings.value("ArmaReforgerTools/burn_terrain", True, type=bool)
 		saved_multiplier = float(settings.value("ArmaReforgerTools/engineer_multiplier", 1.15))
+		saved_erosion = settings.value("ArmaReforgerTools/erosion", False, type=bool)
+		saved_erosion_preset = settings.value("ArmaReforgerTools/erosion_preset", "moderate")
 
 		self.sb_x = QDoubleSpinBox()
 		self.sb_x.setRange(-180.0, 180.0)
@@ -852,6 +854,29 @@ class CombinedArmaInputDialog(QDialog):
 		layout_source.addRow(lbl_engineering)
 		layout_source.addRow("Terrain Engineering:", self.cb_burn_terrain)
 		layout_source.addRow("Engineering Multiplier:", self.sb_multiplier)
+
+		self.cb_erosion = QCheckBox("Hydraulic Erosion (adds detail a coarse DEM cannot resolve)")
+		self.cb_erosion.setChecked(saved_erosion)
+		self.cb_erosion.setToolTip(
+			"Simulates water erosion to add drainage channels and gully detail.\n"
+			"Useful when the source DEM is much coarser than the export: AW3D30\n"
+			"is 30 m/px, so an 8192 px export over 2 km is mostly interpolation.")
+		self.cmb_erosion = QComboBox()
+		self.cmb_erosion.addItems(["subtle", "moderate", "strong"])
+		self.cmb_erosion.setCurrentText(saved_erosion_preset)
+		self.btn_erosion_preview = QPushButton("Preview / Tune...")
+		self.btn_erosion_preview.setToolTip(
+			"Run erosion on a downsampled copy and compare before/after "
+			"before committing to a full export.")
+		self.btn_erosion_preview.clicked.connect(self.open_erosion_preview)
+
+		ero_row = QHBoxLayout()
+		ero_row.addWidget(self.cmb_erosion, 1)
+		ero_row.addWidget(self.btn_erosion_preview)
+		layout_source.addRow("Erosion:", self.cb_erosion)
+		layout_source.addRow("Erosion Strength:", ero_row)
+
+		self.erosion_settings = None
 		main_layout.addWidget(box_source)
 
 		box_output = QGroupBox("5. Output Settings")
@@ -1197,6 +1222,8 @@ class CombinedArmaInputDialog(QDialog):
 
 		settings.setValue("ArmaReforgerTools/format", self.cb_format.currentIndex())
 		settings.setValue("ArmaReforgerTools/burn_terrain", self.cb_burn_terrain.isChecked())
+		settings.setValue("ArmaReforgerTools/erosion", self.cb_erosion.isChecked())
+		settings.setValue("ArmaReforgerTools/erosion_preset", self.cmb_erosion.currentText())
 		settings.setValue("ArmaReforgerTools/engineer_multiplier", self.sb_multiplier.value())
 		settings.setValue("ArmaReforgerTools/output_path", self.le_path.text())
 		settings.setValue("ArmaReforgerTools/api_keys", json.dumps(self.saved_api_keys))
@@ -1223,6 +1250,8 @@ class CombinedArmaInputDialog(QDialog):
 		self.cb_source.setCurrentIndex(0)
 		self.cb_format.setCurrentIndex(0)
 		self.cb_burn_terrain.setChecked(True)
+		self.cb_erosion.setChecked(False)
+		self.cmb_erosion.setCurrentText("moderate")
 		self.sb_multiplier.setValue(1.10)
 		self.le_path.setText("C:/QGIS/ArmaTerrainExport")
 		iface.messageBar().pushMessage("Settings", "Reset to default values.", level=Qgis.Info, duration=3)
@@ -1287,6 +1316,63 @@ class CombinedArmaInputDialog(QDialog):
 			self.le_apikey.setEchoMode(use_normal)
 		else:
 			self.le_apikey.setEchoMode(use_password)
+
+	def open_erosion_preview(self):
+		"""Fetch the DEM for the current extent and open the tuning dialog.
+
+		The preview needs real elevation data, so this performs the same
+		download the export would. It is deliberately a button rather than
+		automatic: the fetch costs time and bandwidth.
+		"""
+		from qgis.PyQt.QtWidgets import QMessageBox, QApplication
+		from qgis.PyQt.QtCore import Qt as _Qt
+
+		try:
+			import numpy as _np
+			from osgeo import gdal as _gdal
+		except Exception as exc:
+			QMessageBox.warning(self, "Erosion", "Could not load GDAL/numpy: %s" % exc)
+			return
+
+		path = self.le_path.text().strip()
+		candidates = []
+		if path and os.path.isdir(path):
+			for name in sorted(os.listdir(path), reverse=True):
+				if name.lower().startswith("heightmap") and name.lower().endswith((".png", ".tif", ".asc")):
+					candidates.append(os.path.join(path, name))
+
+		if not candidates:
+			QMessageBox.information(
+				self, "Erosion Preview",
+				"No heightmap found in the output directory yet.\n\n"
+				"Run an export once, then use this button to tune erosion "
+				"against that heightmap and re-export.")
+			return
+
+		src = candidates[0]
+		try:
+			QApplication.setOverrideCursor(_Qt.WaitCursor if hasattr(_Qt, 'WaitCursor')
+										   else _Qt.CursorShape.WaitCursor)
+			ds = _gdal.Open(src)
+			arr = ds.GetRasterBand(1).ReadAsArray().astype('float32')
+			ds = None
+		finally:
+			QApplication.restoreOverrideCursor()
+
+		try:
+			import erosion_preview
+			pixel = None
+			try:
+				pixel = float(self.sb_size_w.value()) / float(self.sb_res_hm_w.value())
+			except Exception:
+				pass
+			dlg = erosion_preview.ErosionPreviewDialog(arr, pixel_size=pixel, parent=self)
+			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
+			if accepted:
+				self.erosion_settings = dlg.result_settings()
+				self.cb_erosion.setChecked(True)
+		except Exception as exc:
+			QMessageBox.warning(self, "Erosion Preview", "Preview failed: %s" % exc)
 
 	def browse_path(self):
 		directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -1403,6 +1489,7 @@ class CombinedArmaInputDialog(QDialog):
 class TerrainEngineer:
 	def __init__(self, iface):
 		self.iface = iface
+		self.protect_mask = None
 
 	def run(self, output_tif, output_dir, timestamp, xmin, ymin, xmax, ymax,
 			resolution_w, resolution_h, target_crs, source_crs, context, pixel_size, step_callback, engineer_multiplier=1.10):
@@ -1873,6 +1960,10 @@ class TerrainEngineer:
 
 					road_mask = mask_light_b | mask_medium_b | mask_heavy_b | mask_rails_b
 
+					# Hand the shaped areas to the erosion pass so droplets
+					# cannot chew through a flattened road or a carved riverbed.
+					self.protect_mask = road_mask | mask_water_b
+
 					before = elev_array.copy()
 
 					safe_water = water_target + 0.05
@@ -2077,6 +2168,31 @@ class ArmaExportPlugin:
 		output_dir = dialog.le_path.text()
 		format_index = dialog.cb_format.currentIndex()
 		want_burn = dialog.cb_burn_terrain.isChecked() if hasattr(dialog, 'cb_burn_terrain') else False
+
+		# Erosion settings: an explicit Preview/Tune session wins, otherwise
+		# fall back to the preset chosen in the combo.
+		self._erosion_settings = None
+		if getattr(dialog, 'cb_erosion', None) is not None and dialog.cb_erosion.isChecked():
+			tuned = getattr(dialog, 'erosion_settings', None)
+			if tuned:
+				self._erosion_settings = tuned
+			else:
+				try:
+					import erosion as _ero
+					name = dialog.cmb_erosion.currentText()
+					pre = _ero.PRESETS.get(name, _ero.PRESETS['moderate'])
+					params = dict(_ero.DEFAULTS)
+					params['erosion_coeff'] = pre['erosion_coeff']
+					params['ttl'] = pre['ttl']
+					self._erosion_settings = {
+						'params': params,
+						'per_mp': pre['particles_per_mp'],
+						'protect': True,
+						'parallel': True,
+					}
+				except Exception as _ero_exc:
+					QgsMessageLog.logMessage('Erosion unavailable: %s' % _ero_exc,
+											 'ArmaTerrainExport', Qgis.Warning)
 
 		api_key = dialog.le_apikey.text().strip()
 		ot_dem_type = dialog.cb_dataset.currentData() if dialog.cb_dataset.count() > 0 else ""
@@ -2398,6 +2514,7 @@ class ArmaExportPlugin:
 			# =========================================================================
 			if want_burn:
 				engineer = TerrainEngineer(self.iface)
+				self._engineer = engineer
 				engineer.run(
 					output_tif=output_tif,
 					output_dir=output_dir,
@@ -2411,6 +2528,7 @@ class ArmaExportPlugin:
 					pixel_size=(xmax - xmin) / resolution_w,
 					step_callback=step
 				)
+				self._engineer_protect_mask = engineer.protect_mask
 			# =========================================================================
 
 			step(85, "Applying Enfusion specific corrections...")
@@ -2421,10 +2539,81 @@ class ArmaExportPlugin:
 			if np.any(valid_mask):
 				min_val = float(np.min(elevation_resampled[valid_mask]))
 				max_val = float(np.max(elevation_resampled[valid_mask]))
-				elevation_resampled = np.where(valid_mask, elevation_resampled, min_val)
+
+				# Filling NoData with min_val drops every void to the lowest
+				# point on the map. Where the DEM does not reach the export
+				# window -- a tile boundary along one edge is the common case --
+				# that is a cliff the full height of the terrain wrapping the
+				# border, which reads in the Enfusion editor as a giant bowl and
+				# drags the interior out of shape through LOD blending.
+				# Replicate the nearest valid elevation instead, so a void
+				# continues the terrain around it rather than cutting a hole.
+				if not np.all(valid_mask):
+					n_void = int((~valid_mask).sum())
+					try:
+						from scipy.ndimage import distance_transform_edt
+						_, (iy, ix) = distance_transform_edt(
+							~valid_mask, return_indices=True)
+						elevation_resampled = np.where(
+							valid_mask, elevation_resampled,
+							elevation_resampled[iy, ix])
+						fill_note = "nearest-valid replication"
+					except Exception:
+						elevation_resampled = np.where(
+							valid_mask, elevation_resampled, min_val)
+						fill_note = "min_val (scipy unavailable)"
+					QgsMessageLog.logMessage(
+						"Filled %d NoData pixels by %s" % (n_void, fill_note),
+						"ArmaTerrainExport", Qgis.Info)
 			else:
 				min_val = float(np.min(elevation_resampled))
 				max_val = float(np.max(elevation_resampled))
+
+			# --- HYDRAULIC EROSION -------------------------------------------
+			erosion_settings = getattr(self, "_erosion_settings", None)
+			if erosion_settings:
+				try:
+					step(86, "Running hydraulic erosion...")
+					import erosion as _erosion
+
+					elev_f = elevation_resampled.astype(np.float32)
+					params = dict(erosion_settings.get('params', {}))
+					mp = elev_f.size / 1e6
+					params['n_particles'] = max(
+						1000, int(erosion_settings.get('per_mp', 100000) * mp))
+
+					protect = None
+					if erosion_settings.get('protect'):
+						protect = getattr(self, "_engineer_protect_mask", None)
+
+					def _erosion_step(frac, msg):
+						step(86 + int(frac * 3), msg)
+
+					runner = (_erosion.simulate_parallel
+							  if erosion_settings.get('parallel')
+							  else _erosion.simulate)
+					eroded = runner(elev_f, params, protect_mask=protect,
+									progress=_erosion_step, seed=1)
+
+					if np.isfinite(eroded).all():
+						elevation_resampled = eroded.astype(
+							elevation_resampled.dtype)
+						min_val = float(np.min(elevation_resampled))
+						max_val = float(np.max(elevation_resampled))
+						QgsMessageLog.logMessage(
+							"Erosion applied: %s particles" % (
+								"{:,}".format(params['n_particles'])),
+							"ArmaTerrainExport", Qgis.Info)
+					else:
+						QgsMessageLog.logMessage(
+							"Erosion produced non-finite values; keeping "
+							"un-eroded heightmap.", "ArmaTerrainExport",
+							Qgis.Warning)
+				except Exception as ero_exc:
+					# Erosion is an enhancement; never lose the export over it.
+					QgsMessageLog.logMessage(
+						"Erosion skipped: %s" % ero_exc,
+						"ArmaTerrainExport", Qgis.Warning)
 
 			ds_out.GetRasterBand(1).WriteArray(elevation_resampled)
 			ds_out.FlushCache()
