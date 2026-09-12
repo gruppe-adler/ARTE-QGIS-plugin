@@ -118,6 +118,98 @@ DEFAULT_SOURCES = [
 ]
 
 # --- Map Tool classes ---
+# Sentinel written into pixels the warp could not cover.
+#
+# gdal.Warp initialises its destination buffer before warping source pixels in,
+# and with no dstNodata that init value is 0. Where the fetched DEM falls short
+# of the requested outputBounds -- OpenTopography snaps to whole ~30 m source
+# cells, so a request can come back a fraction of a cell small -- the margin is
+# left at 0 and nothing records that the warp never touched it. Real terrain at
+# 0 m is then indistinguishable from a void, which is why every downstream
+# heuristic to spot it has failed: on a coastal map the two are genuinely the
+# same number.
+#
+# -32768 is exactly representable in float32 (so equality is exact), far below
+# any real elevation, and is already the value the existing `> -10000` tests
+# were written to catch.
+VOID_SENTINEL = -32768.0
+
+
+def _probe_nodata(path):
+    """The NoData value a source raster declares, or None.
+
+    Passed as srcNodata so the warper excludes flagged voids from the
+    resampling kernel -- otherwise a wide Lanczos window straddling an SRTM
+    hole smears the sentinel into its valid neighbours. GDAL accepts None and
+    simply omits the option, so no branching is needed at the call site.
+    """
+    try:
+        _ds = gdal.Open(path, gdal.GA_ReadOnly)
+        if _ds is None:
+            return None
+        _nd = _ds.GetRasterBand(1).GetNoDataValue()
+        _ds = None
+        return _nd
+    except Exception:
+        return None
+
+
+def _fill_voids_in_place(path, step_callback=None):
+    """Replace void pixels in `path` with the nearest valid elevation.
+
+    Run directly after the warp, before anything reads the raster. Voids are
+    identified by the NoData value the warp recorded, so there is no threshold
+    to guess. Nearest-valid replication continues the surrounding terrain
+    outward rather than cutting a hole, which keeps the exported extent exactly
+    what the user asked for.
+
+    Returns the number of pixels filled, or 0 if there was nothing to do.
+    """
+    try:
+        ds = gdal.Open(path, gdal.GA_Update)
+        if ds is None:
+            return 0
+        band = ds.GetRasterBand(1)
+        nd = band.GetNoDataValue()
+        arr = band.ReadAsArray()
+
+        valid = arr > -10000.0
+        if nd is not None and nd <= -10000.0:
+            valid &= (arr != nd)
+
+        n_void = int((~valid).sum())
+        if n_void == 0 or not valid.any():
+            ds = None
+            return 0
+
+        if step_callback:
+            step_callback(84, "Filling %s void pixels..." % "{:,}".format(n_void))
+
+        from scipy.ndimage import distance_transform_edt
+        _, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
+        arr = np.where(valid, arr, arr[iy, ix])
+
+        band.WriteArray(arr)
+        # The raster no longer contains voids, so it must not advertise one --
+        # a declared NoData on fully valid data invites downstream tools to
+        # mask real terrain that happens to equal the sentinel.
+        try:
+            band.DeleteNoDataValue()
+        except Exception:
+            pass
+        ds.FlushCache()
+        ds = None
+
+        QgsMessageLog.logMessage(
+            "Filled %d void pixels by nearest-valid replication" % n_void,
+            "ArmaTerrainExport", Qgis.Info)
+        return n_void
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            "Void fill skipped: %s" % exc, "ArmaTerrainExport", Qgis.Warning)
+        return 0
+
+
 def _find_heightmap(directory):
 	"""Newest real heightmap export in `directory`, or None.
 
@@ -2842,12 +2934,14 @@ class ArmaExportPlugin:
 				srs.ImportFromEPSG(3857)
 				ds_mem.SetProjection(srs.ExportToWkt())
 				ds_mem.GetRasterBand(1).WriteArray(elevation)
+				ds_mem.GetRasterBand(1).SetNoDataValue(VOID_SENTINEL)
 
 				gdal.Warp(output_tif, ds_mem,
 						  width=resolution_w, height=resolution_h,
 						  outputBounds=(xmin, ymin, xmax, ymax),
 						  resampleAlg=gdal_alg,
 						  outputType=gdal.GDT_Float32,
+						  dstNodata=VOID_SENTINEL,
 						  format='GTiff')
 
 				ds_mem = None
@@ -2913,6 +3007,8 @@ class ArmaExportPlugin:
 								  dstSRS='EPSG:3857',
 								  resampleAlg=gdal_alg,
 								  outputType=gdal.GDT_Float32,
+								  srcNodata=_probe_nodata(temp_rgb_tif),
+								  dstNodata=VOID_SENTINEL,
 								  format='GTiff')
 					else:
 						# GDAL standard direct fetch
@@ -2922,6 +3018,8 @@ class ArmaExportPlugin:
 								  dstSRS='EPSG:3857',
 								  resampleAlg=gdal_alg,
 								  outputType=gdal.GDT_Float32,
+								  srcNodata=_probe_nodata(url),
+								  dstNodata=VOID_SENTINEL,
 								  format='GTiff')
 
 				except Exception as e:
@@ -2930,6 +3028,14 @@ class ArmaExportPlugin:
 			# =========================================================================
 			# TERRAIN ENGINEERING
 			# =========================================================================
+			# Fill voids before the terrain engineer, not after. The engineer
+			# flattens roads and carves rivers using gaussian blurs and distance
+			# transforms; run over an unfilled border those pull void elevations
+			# into real terrain along any corridor that crosses the edge, and
+			# the damage is written back before the correction step below ever
+			# sees it.
+			_fill_voids_in_place(output_tif, step)
+
 			if want_burn:
 				engineer = TerrainEngineer(self.iface)
 				self._engineer = engineer
@@ -2953,49 +3059,19 @@ class ArmaExportPlugin:
 			ds_out = gdal.Open(output_tif, gdal.GA_Update)
 			elevation_resampled = ds_out.GetRasterBand(1).ReadAsArray()
 
-			# `> -10000` only catches sentinel NoData such as -32768. Voids can
-			# also arrive at ordinary-looking elevations: this export produced a
-			# 2.4% border sitting near 0 m against terrain at ~2465 m. Those
-			# passed the sentinel test, so the 16-bit PNG had to span 2921 m
-			# instead of the real 489 m of relief -- squeezing every real
-			# feature into the top 17% of the range, which is what makes the
-			# heightmap look flat in preview and in the editor.
-			#
-			# Detect them from the terrain's own distribution, but only trust
-			# the verdict where voids actually occur: against the outside edge.
-			# A blanket low-elevation cut is not safe -- tried at 4x IQR it
-			# flagged 1.67 M pixels of genuine low ground on this very map.
+			# Voids are now marked at the warp (see VOID_SENTINEL), so the mask can
+			# read the value GDAL actually recorded instead of guessing from the
+			# terrain's own distribution. Every heuristic tried here failed: a
+			# blanket low-elevation cut flagged 1.67 M pixels of genuine low ground,
+			# and an edge-connected flood fill silently missed the border entirely on
+			# a coastal map, where pad and real sea level are the same number.
+			_nd = ds_out.GetRasterBand(1).GetNoDataValue()
 			valid_mask = elevation_resampled > -10000.0
-			if np.any(valid_mask):
-				_ref = elevation_resampled[valid_mask]
-				_p01 = float(np.percentile(_ref, 1))
-				_p50 = float(np.percentile(_ref, 50))
-				_drop = _p50 - _p01
-				if _drop > 200.0:
-					# The low tail is far below the bulk of the terrain, which
-					# real relief does not do at this scale. Flood-fill the
-					# suspect band inward from the border so only edge-connected
-					# voids are removed and interior valleys are left alone.
-					try:
-						from scipy.ndimage import label as _label
-						_suspect = elevation_resampled < (_p01 + _drop * 0.25)
-						if _suspect.any():
-							_lab, _n = _label(_suspect)
-							_edge = np.concatenate([
-								_lab[0], _lab[-1], _lab[:, 0], _lab[:, -1]])
-							_edge_ids = np.unique(_edge[_edge > 0])
-							if _edge_ids.size:
-								_border_void = np.isin(_lab, _edge_ids)
-								valid_mask &= ~_border_void
-								QgsMessageLog.logMessage(
-									"Detected %d edge-connected void pixels near %.0f m "
-									"(terrain median %.0f m)" % (
-										int(_border_void.sum()), _p01, _p50),
-									"ArmaTerrainExport", Qgis.Info)
-					except Exception as _void_exc:
-						QgsMessageLog.logMessage(
-							"Border void detection skipped: %s" % _void_exc,
-							"ArmaTerrainExport", Qgis.Warning)
+			if _nd is not None and _nd <= -10000.0:
+				# Only trust an out-of-range sentinel. If a source declared an
+				# in-range NoData such as 0 and GDAL propagated it, masking every
+				# pixel at that elevation would delete real terrain.
+				valid_mask &= (elevation_resampled != _nd)
 			if np.any(valid_mask):
 				min_val = float(np.min(elevation_resampled[valid_mask]))
 				max_val = float(np.max(elevation_resampled[valid_mask]))
