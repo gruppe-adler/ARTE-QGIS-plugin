@@ -142,6 +142,17 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
 
     rng = np.random.default_rng(seed)
     brush = _brush_offsets(int(p['radius'])) if int(p['radius']) > 0 else None
+
+    # Stability bounds, in the heightmap's own vertical units so they hold
+    # whether it carries metres or a normalised 0..1 range.
+    relief = float(np.ptp(hmap))
+    if not np.isfinite(relief) or relief <= 0:
+        relief = 1.0
+    # Generous enough not to constrain erosion on real terrain (measured
+    # identical channel structure from 0.05 up to 1.0 of relief), tight enough
+    # to stop the runaway pit feedback that produces inf/NaN.
+    max_change = np.float32(relief * 0.25)
+    max_vel_sq = np.float32(relief * relief)
     n = int(p['n_particles'])
     if n <= 0:
         return hmap
@@ -187,6 +198,13 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
 
             cap = np.maximum(-dh, p['min_slope']) * vel[idx] * water[idx] * p['capacity']
 
+            # A droplet that keeps accelerating into a pit it is itself
+            # deepening diverges: capacity grows, it erodes more, the slope
+            # steepens, and the values run to inf/NaN within a few dozen
+            # steps. Real DEM noise triggers this readily. Bound the per-step
+            # change to a fraction of the local relief.
+            cap = np.minimum(cap, max_change)
+
             # Uphill or over capacity -> drop sediment; else pick some up.
             depositing = (dh > 0) | (sediment[idx] > cap)
             amount = np.where(
@@ -197,6 +215,8 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
                 -np.minimum((cap - sediment[idx]) * p['erosion_coeff'], -dh),
             )
 
+            amount = np.clip(amount, -max_change, max_change)
+
             dep = depositing & ~oob
             if dep.any():
                 _deposit(hmap, cx[dep], cy[dep], amount[dep])
@@ -206,7 +226,8 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
 
             sediment[idx] -= amount
 
-            vel[idx] = np.sqrt(np.maximum(vel[idx] ** 2 + (-dh) * p['gravity'], 0.0))
+            vel[idx] = np.sqrt(np.clip(vel[idx] ** 2 + (-dh) * p['gravity'],
+                                       0.0, max_vel_sq))
             water[idx] *= (1 - p['evaporation'])
 
             x[idx], y[idx] = nx, ny
@@ -219,6 +240,12 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
 
     if protect_mask is not None:
         hmap = np.where(protect_mask, original, hmap)
+
+    if not np.isfinite(hmap).all():
+        hmap = np.nan_to_num(hmap, nan=0.0, posinf=0.0, neginf=0.0)
+        bad = ~np.isfinite(heightmap.astype(np.float32))
+        hmap = np.where(bad, hmap, np.where(np.isfinite(hmap), hmap,
+                                            heightmap.astype(np.float32)))
 
     return hmap
 
