@@ -1674,7 +1674,8 @@ class TerrainEngineer:
 		self.protect_mask = None
 
 	def run(self, output_tif, output_dir, timestamp, xmin, ymin, xmax, ymax,
-			resolution_w, resolution_h, target_crs, source_crs, context, pixel_size, step_callback, engineer_multiplier=1.10):
+			resolution_w, resolution_h, target_crs, source_crs, context, pixel_size, step_callback, engineer_multiplier=1.10,
+			write_diff_map=False):
 
 		created_temp_files = []
 		log_path = os.path.join(output_dir, f"engineer_debug_{timestamp}.txt")
@@ -1935,11 +1936,14 @@ class TerrainEngineer:
 						"OUTPUT": path
 					})
 
-					for _ in range(120):
-						if os.path.exists(path) and os.path.getsize(path) > 0:
-							break
-						time.sleep(0.05)
-
+					# There used to be a `for _ in range(120): sleep(0.05)` poll
+					# here waiting for this file. processing.run above is
+					# synchronous -- it has already finished writing -- so the
+					# wait was redundant, and `getsize() > 0` is not a valid
+					# completeness test anyway because GDAL writes the TIFF
+					# header before the raster body. In the one case it would
+					# have mattered it froze the GUI for 6 s per mask, twelve
+					# times over, with no way to cancel.
 					if not os.path.exists(path):
 						debug_log(f"    -> ERROR: Raster file was NOT created: {path}")
 						debug_log(f"    -> GDAL result: {result}")
@@ -2003,13 +2007,20 @@ class TerrainEngineer:
 				poly_buffered_layer = create_buffer(layer_water_polys, adaptive_buffer)
 				mask_w_polys_b = create_mask_from_layer(poly_buffered_layer, "mask_w_polys_b")
 
-				mask_w_polys_b = gaussian_filter(mask_w_polys_b.astype(np.float32), sigma=1.2) > 0.5
+				# create_mask_from_layer returns an all-zero array rather than
+				# None when a layer has no features, so without this guard the
+				# four passes below run on an empty mask -- measured 10.6 s of
+				# pure waste at 8192x8192 on any map with no water polygons.
+				if mask_w_polys_b.any():
+					mask_w_polys_b = gaussian_filter(mask_w_polys_b.astype(np.float32), sigma=1.2) > 0.5
 
-				from scipy.ndimage import binary_fill_holes, binary_opening, binary_closing
-				mask_w_polys_b = binary_fill_holes(mask_w_polys_b)
+					from scipy.ndimage import binary_fill_holes, binary_opening, binary_closing
+					mask_w_polys_b = binary_fill_holes(mask_w_polys_b)
 
-				mask_w_polys_b = binary_opening(mask_w_polys_b, structure=np.ones((3,3)))
-				mask_w_polys_b = binary_closing(mask_w_polys_b, structure=np.ones((3,3)))
+					mask_w_polys_b = binary_opening(mask_w_polys_b, structure=np.ones((3,3)))
+					mask_w_polys_b = binary_closing(mask_w_polys_b, structure=np.ones((3,3)))
+				else:
+					debug_log("Skipping water-polygon morphology (empty mask).")
 
 				mask_water_c = np.logical_or(mask_w_lines_c, mask_w_polys_c)
 				mask_water_b = np.logical_or(mask_w_lines_b, mask_w_polys_b)
@@ -2087,6 +2098,15 @@ class TerrainEngineer:
 							log=lambda m, _n=nm: debug_log("  [%s] %s" % (_n, m)))
 						shaped_any = True
 					used_profile_roads = shaped_any
+				except MemoryError as _rw_mem:
+					# Distinct from a routine fallback: running out of memory means the
+					# fast path could not even be attempted at this resolution. Logging
+					# it as an ordinary failure is how a 209 GiB allocation hid behind a
+					# quiet 'using raster ribbons' line for as long as it did.
+					debug_log("OUT OF MEMORY in per-feature road shaping (%s). "
+							  "Falling back to raster ribbons -- roads will be canted. "
+							  "Please report this with your export size." % _rw_mem)
+					used_profile_roads = False
 				except Exception as _rw_exc:
 					debug_log("Per-feature road shaping failed (%s); using raster ribbons." % _rw_exc)
 					used_profile_roads = False
@@ -2125,6 +2145,11 @@ class TerrainEngineer:
 							depth_m=1.5,
 							log=lambda m: debug_log("  [Rivers] %s" % m))
 						used_profile_rivers = True
+				except MemoryError as _rv_mem:
+					debug_log("OUT OF MEMORY in per-feature river carving (%s). "
+							  "Falling back to the geomorph pass. "
+							  "Please report this with your export size." % _rv_mem)
+					used_profile_rivers = False
 				except Exception as _rv_exc:
 					debug_log("Per-feature river carving failed (%s); using geomorph pass." % _rv_exc)
 					used_profile_rivers = False
@@ -2243,18 +2268,26 @@ class TerrainEngineer:
 				band_elev.ComputeStatistics(False)
 				# ---------------------------------------------------------------
 
-				debug_log("Generating difference map...")
-				diff_array = elev_array - original_elev_array
-				diff_tif_path = os.path.join(output_dir, f"heightmap_diff_{timestamp}.tif")
+				# The difference map is a debug artefact: nothing reads it back
+				# and nothing deletes it. It also caused real trouble -- both
+				# preview dialogs used to pick heightmap_diff_*.tif instead of
+				# the actual heightmap, showing roads on a blank field. Write it
+				# only when asked, and compress it when we do (it was 256 MB
+				# uncompressed per export).
+				if write_diff_map:
+					debug_log("Generating difference map...")
+					diff_array = elev_array - original_elev_array
+					diff_tif_path = os.path.join(output_dir, f"heightmap_diff_{timestamp}.tif")
 
-				driver = gdal.GetDriverByName("GTiff")
-				ds_diff = driver.Create(diff_tif_path, resolution_w, resolution_h, 1, gdal.GDT_Float32)
-				ds_diff.SetGeoTransform(ds_elev.GetGeoTransform())
-				ds_diff.SetProjection(ds_elev.GetProjection())
-				ds_diff.GetRasterBand(1).WriteArray(diff_array)
-				ds_diff.FlushCache()
-				ds_diff = None
-				debug_log(f"Difference map saved to: {diff_tif_path}")
+					driver = gdal.GetDriverByName("GTiff")
+					ds_diff = driver.Create(diff_tif_path, resolution_w, resolution_h, 1,
+											gdal.GDT_Float32, options=["COMPRESS=LZW"])
+					ds_diff.SetGeoTransform(ds_elev.GetGeoTransform())
+					ds_diff.SetProjection(ds_elev.GetProjection())
+					ds_diff.GetRasterBand(1).WriteArray(diff_array)
+					ds_diff.FlushCache()
+					ds_diff = None
+					debug_log(f"Difference map saved to: {diff_tif_path}")
 
 				ds_elev.FlushCache()
 				ds_elev = None

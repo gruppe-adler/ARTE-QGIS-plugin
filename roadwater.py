@@ -166,27 +166,37 @@ def stamp_profile(z, pts, prof, half_width_px, feather_px, out=None,
         return out, weight
 
     # Nearest-station lookup over the feature's bounding box only.
-    rr, cc = np.mgrid[r_lo:r_hi, c_lo:c_hi]
-    flat_r = rr.reshape(-1, 1)
-    flat_c = cc.reshape(-1, 1)
+    #
+    # This used to compare every pixel in the bounding box against every
+    # station in chunks of 512, which allocates a (bbox_pixels x 512) float64
+    # matrix. For a road spanning an 8192 px export that is 281 GB: it either
+    # raised MemoryError or thrashed until the host gave up, and because the
+    # caller wrapped it in a bare `except Exception` the export silently fell
+    # back to the slow raster path -- or took QGIS down with it.
+    #
+    # A distance transform does the same job in one pass. Seed a small raster
+    # with the station indices, and scipy hands back both the distance to the
+    # nearest seed and which seed it was, in O(bbox) time and memory.
+    sub_shape = (r_hi - r_lo, c_hi - c_lo)
+    seed_idx = np.full(sub_shape, -1, np.int32)
+    sr = np.clip(np.round(pts[:, 0]).astype(np.int64) - r_lo, 0, sub_shape[0] - 1)
+    sc = np.clip(np.round(pts[:, 1]).astype(np.int64) - c_lo, 0, sub_shape[1] - 1)
+    seed_idx[sr, sc] = np.arange(len(pts), dtype=np.int32)
+    seeds = seed_idx >= 0
+    if not seeds.any():
+        return out, weight
 
-    # Chunk the stations so a long line does not allocate an enormous matrix.
-    best_d = np.full(flat_r.shape[0], np.inf)
-    best_i = np.zeros(flat_r.shape[0], np.int64)
-    CH = 512
-    for s in range(0, len(pts), CH):
-        seg = pts[s:s + CH]
-        d = ((flat_r - seg[:, 0]) ** 2 + (flat_c - seg[:, 1]) ** 2)
-        loc = d.argmin(axis=1)
-        dmin = d[np.arange(d.shape[0]), loc]
-        upd = dmin < best_d
-        best_d[upd] = dmin[upd]
-        best_i[upd] = loc[upd] + s
+    dist2d, (iy, ix) = distance_transform_edt(~seeds, return_indices=True)
+    dist = dist2d.reshape(-1)
+    best_i = seed_idx[iy, ix].reshape(-1).astype(np.int64)
 
-    dist = np.sqrt(best_d)
     inside = dist <= half_width_px + feather_px
     if not inside.any():
         return out, weight
+
+    rr, cc = np.mgrid[r_lo:r_hi, c_lo:c_hi]
+    flat_r = rr.reshape(-1, 1)
+    flat_c = cc.reshape(-1, 1)
 
     # Snapping to the nearest station still leaves a cant: stations sit about
     # a pixel apart, so pixels across the width land on different ones, and on
