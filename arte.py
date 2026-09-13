@@ -341,6 +341,18 @@ def _fill_voids_in_place(path, step_callback=None):
         mc = np.clip(2 * ix - cols, 0, arr.shape[1] - 1)
         nearest = arr[iy, ix]
         mirrored = np.where(valid[mr, mc], arr[mr, mc], nearest)
+        # Mirroring a steep mountainside back out over a narrow border stacks
+        # that whole slope into a few pixels: measured 259 m of rise over 8 m
+        # of ground along the top edge, which is the vertical wall at the map
+        # boundary in the editor. Bound how far the mirrored value may depart
+        # from the edge elevation, so the fill adds texture without inventing
+        # a cliff -- the budget grows with distance at the terrain's own 95th
+        # percentile slope.
+        _slope = float(np.percentile(np.abs(np.diff(arr, axis=0)), 95))
+        if not np.isfinite(_slope) or _slope <= 0:
+            _slope = 1.0
+        _budget = _slope * np.maximum(dist, 1.0)
+        mirrored = np.clip(mirrored, nearest - _budget, nearest + _budget)
         blend = np.clip(dist / max(float(_FILL_FADE_PX), 1e-6), 0.0, 1.0)
         arr = np.where(valid, arr,
                        nearest * (1.0 - blend) + mirrored * blend).astype(arr.dtype)
@@ -3363,6 +3375,40 @@ class ArmaExportPlugin:
 					QgsMessageLog.logMessage(
 						"Erosion skipped: %s" % ero_exc,
 						"ArmaTerrainExport", Qgis.Warning)
+
+			# Repair constant edge bands once more, on the final array.
+			# The earlier pass runs before the terrain engineer and erosion,
+			# and both write the border again afterwards -- erosion in
+			# particular is not masked away from the filled margin, so it
+			# re-flattens it. Measured on a real export: the first pass alone
+			# left 9-22 px bands ending in a 2466-unit cliff, which is the wall
+			# at the map edge in the editor.
+			try:
+				_band = _constant_edge_band(elevation_resampled,
+											np.ones(elevation_resampled.shape, bool))
+				if _band.any():
+					from scipy.ndimage import distance_transform_edt as _edt
+					_ok = ~_band
+					if _ok.any():
+						_d, (_iy, _ix) = _edt(_band, return_indices=True)
+						_rows = np.arange(elevation_resampled.shape[0])[:, None]
+						_cols = np.arange(elevation_resampled.shape[1])[None, :]
+						_mr = np.clip(2 * _iy - _rows, 0, elevation_resampled.shape[0] - 1)
+						_mc = np.clip(2 * _ix - _cols, 0, elevation_resampled.shape[1] - 1)
+						_near = elevation_resampled[_iy, _ix]
+						_mir = np.where(_ok[_mr, _mc], elevation_resampled[_mr, _mc], _near)
+						_w = np.clip(_d / max(float(_FILL_FADE_PX), 1e-6), 0.0, 1.0)
+						elevation_resampled = np.where(
+							_ok, elevation_resampled,
+							_near * (1.0 - _w) + _mir * _w).astype(elevation_resampled.dtype)
+						min_val = float(np.min(elevation_resampled))
+						max_val = float(np.max(elevation_resampled))
+						QgsMessageLog.logMessage(
+							"Repaired %d constant edge pixels after erosion"
+							% int(_band.sum()), "ArmaTerrainExport", Qgis.Info)
+			except Exception as _be:
+				QgsMessageLog.logMessage("Edge band repair skipped: %s" % _be,
+										 "ArmaTerrainExport", Qgis.Warning)
 
 			ds_out.GetRasterBand(1).WriteArray(elevation_resampled)
 			ds_out.FlushCache()
