@@ -118,6 +118,30 @@ _miss = sorted(k for k in _kw if k not in _sig and k not in ("type", "key"))
 chk("engineer.run call site matches its signature", not _miss,
     ("missing: %s" % _miss) if _miss else "")
 
+# Along-road crumpling. The grade-cap re-anchor used to assign the profile back
+# to ground in a single station, which on any road steeper than the cap fires
+# repeatedly: measured a 2.105 m step every ~37 stations at regular spacing, a
+# sawtooth stamped across the full corridor width.
+_gt = np.arange(0, 220, 1.0)
+_gg = _gt * 0.125                       # 12.5% road against a 7% cap
+_gp = roadwater.smooth_profile(_gg.copy(), 1.0, 20.0, 0.07)
+_gstep = float(np.abs(np.diff(_gp)).max())
+chk("grade cap does not sawtooth the road", _gstep < 0.5,
+    "max along-road step %.3f m" % _gstep)
+
+# ...but the road must still not float away from the ground, which is exactly
+# what the hard snap existed to prevent.
+_gfloat = float(np.abs(_gp - _gg).max())
+chk("road still follows the ground", _gfloat < 5.0,
+    "max float %.2f m" % _gfloat)
+
+# ...and the cap must still flatten DEM noise on a road gentle enough to follow.
+_nz = np.arange(300) * 0.02 + np.random.default_rng(0).normal(0, 0.4, 300)
+_np_ = roadwater.smooth_profile(_nz.copy(), 1.0, 20.0, 0.07)
+chk("grade cap still smooths a followable road",
+    np.abs(np.diff(_np_)).max() <= 0.07 + 1e-9,
+    "max grade %.4f" % np.abs(np.diff(_np_)).max())
+
 # numeric behaviour
 rng=np.random.default_rng(0); N=256
 y,x=np.mgrid[0:N,0:N]/float(N)

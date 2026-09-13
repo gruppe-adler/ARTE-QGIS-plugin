@@ -87,13 +87,30 @@ def smooth_profile(prof, pixel_size, smooth_m=60.0, max_grade=None):
         # actually follow it, and re-anchor to the ground otherwise.
         ground = out.copy()
         max_float = max(2.0, limit * 8.0)
+        # Re-anchoring by assignment (out[i] = ground[i]) is a hard snap, and
+        # on any road steeper than the cap it fires over and over: the profile
+        # drifts until it exceeds max_float, snaps back in a single station,
+        # then drifts again. Measured on a 12.5% road against a 7% cap, that
+        # is a 2.1 m step every 37 stations at a near-perfect regular spacing
+        # -- a sawtooth, not noise. Each step is written across the full
+        # corridor width, so it crumples the road and both its edges.
+        #
+        # Bleeding the excess off a little at a time keeps the road tied to
+        # the ground without ever stepping: the profile still cannot float
+        # away, it just converges instead of snapping.
+        # Strength of the pull. Too gentle and the road floats further than the
+        # snap ever allowed -- measured 11.3 m on a 40% slope at pull 0.25,
+        # against the 2 m the snap enforced. A firm pull keeps the float
+        # bounded while still arriving over several stations instead of one.
+        pull = 0.5
         for _ in range(2):
             for i in range(1, len(out)):
                 d = out[i] - out[i - 1]
                 if abs(d) > limit:
                     out[i] = out[i - 1] + np.sign(d) * limit
-                if abs(out[i] - ground[i]) > max_float:
-                    out[i] = ground[i]
+                excess = out[i] - ground[i]
+                if abs(excess) > max_float:
+                    out[i] -= (abs(excess) - max_float) * np.sign(excess) * pull
             out = out[::-1]
             ground = ground[::-1]
     return out
@@ -216,6 +233,24 @@ def stamp_profile(z, pts, prof, half_width_px, feather_px, out=None,
 
     target = np.interp(station, np.arange(len(prof), dtype=np.float64),
                        prof) - depth
+
+    # Measure the corridor from the TRUE line, not from the rounded seeds.
+    #
+    # The EDT is seeded with np.round(pts), so its distances are measured to
+    # a Bresenham staircase rather than to the polyline. The error is ~0.02 px
+    # where pixels happen to land on the line (a road running at 0, 45 or 90
+    # degrees) but 0.5-0.87 px at every other bearing, and it is periodic
+    # rather than random -- so the corridor edge scallops in and out along the
+    # road's length. On a 25% slope that showed up as jumps of up to 1.04 m
+    # running ALONG the road edge, worst near 30 degrees and absent on the
+    # axes. The station above is already an exact perpendicular foot, so the
+    # true distance costs one more hypot and removes the staircase entirely.
+    foot_r = np.interp(station, np.arange(len(pts), dtype=np.float64),
+                       pts[:, 0])
+    foot_c = np.interp(station, np.arange(len(pts), dtype=np.float64),
+                       pts[:, 1])
+    dist = np.hypot(flat_r.reshape(-1) - foot_r, flat_c.reshape(-1) - foot_c)
+
     alpha = np.ones_like(dist)
     if feather_px > 0:
         alpha = np.clip((half_width_px + feather_px - dist) / feather_px, 0.0, 1.0)
