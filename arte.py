@@ -1689,12 +1689,11 @@ class CombinedArmaInputDialog(QDialog):
 		runs inside a full export. Returns an empty list on any failure -- the
 		preview is still useful without it, so a network problem must not raise.
 
-		`extent` is (west, south, east, north) in degrees, taken from the
-		heightmap's own georeferencing. Deriving it from the size spinboxes
-		instead was wrong: those hold a Web-Mercator-descaled value, so treating
-		them as ground metres built a box 1/cos(latitude) too small -- 21.8% at
-		Bamiyan -- and every road was stretched outward from centre until the
-		edges fell outside the raster.
+		`extent` is (west, south, east, north) in degrees. Prefer the heightmap's
+		own georeferencing when it has any, so the preview cannot drift from the
+		export; fall back to the size spinboxes, which are ground metres (the
+		export computes grid_cell_size as size_w / resolution_w from the same
+		values).
 		"""
 		try:
 			import json, urllib.request
@@ -1709,15 +1708,15 @@ class CombinedArmaInputDialog(QDialog):
 				size_h = float(self.sb_size_h.value())
 				if size_w <= 0 or size_h <= 0:
 					return []
-				# Fallback only. The spinboxes are Mercator-descaled, so undo
-				# that before treating them as ground metres.
-				sf = 1.0 / max(math.cos(math.radians(cy)), 1e-6)
+				# size_w/size_h are ground metres: the export derives its own
+				# grid_cell_size as size_w / resolution_w, and that matches the
+				# cell size written to enfusion_import.txt. Do not rescale them.
 				m_lat = 111132.92 - 559.82 * math.cos(2 * math.radians(cy))
 				m_lon = 111412.84 * math.cos(math.radians(cy))
 				if m_lat <= 0 or m_lon <= 0:
 					return []
-				dlat = (size_h * sf / 2.0) / m_lat
-				dlon = (size_w * sf / 2.0) / m_lon
+				dlat = (size_h / 2.0) / m_lat
+				dlon = (size_w / 2.0) / m_lon
 				south, north = cy - dlat, cy + dlat
 				west, east = cx - dlon, cx + dlon
 			if not (east > west and north > south):

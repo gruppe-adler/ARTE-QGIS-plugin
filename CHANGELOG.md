@@ -18,18 +18,16 @@ numbering; 1.1.0 is the last upstream release this fork was taken from.
   path honours it; the per-feature shaping never read it and used one constant
   per class. Each road is now shaped at its own width: 7 m → 6 px, 4 m → 4 px,
   12 m → 12 px.
-- **Two dead-straight segments meeting at an elbow in the preview.** Both causes
-  were preview-only — the export converts geometry through the raster's own
-  GeoTransform and was never affected. The preview built its Overpass bounding
-  box from the size spinboxes as if they held ground metres, but they hold a
-  Web-Mercator-descaled value, so the box was 1/cos(latitude) too small (21.8%
-  at Bamiyan) and roads were stretched outward until their edges left the
-  raster. Those out-of-raster vertices were then clamped to the border rather
-  than clipped — 65% of vertices lie outside a Bamiyan export, since Overpass
-  returns whole ways — pinning long runs onto the edge and stamping straight
-  ribbons along it. The preview now takes its extent from the raster's
-  georeferencing where available, and splits polylines at the boundary instead
-  of clamping: 7 edge-ribbon lines → 0, with all 35 source ways preserved.
+- **Two dead-straight segments meeting at an elbow in the preview.** Preview-only
+  — the export converts geometry through the raster's own GeoTransform and was
+  never affected. Overpass returns whole ways whenever any part intersects the
+  query box, so 65% of vertices lie outside a Bamiyan export. Those were clamped
+  to the raster border rather than clipped, pinning long runs of points onto the
+  edge and stamping straight ribbons along it; a way leaving one edge and
+  re-entering another drew a false chord across the map. Polylines are now split
+  at the boundary instead: 7 edge-ribbon lines → 0, with all 35 source ways
+  preserved. The preview also now prefers the heightmap's own georeferencing for
+  its query box where the file carries any, and ignores non-way elements.
 
 ## [1.2.1] — 2026-09-13
 
