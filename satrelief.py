@@ -271,6 +271,14 @@ def apply(heightmap, satmap, pixel_size, params=None, protect_mask=None,
         progress(0.3, 'Recovering micro-relief from shading...')
 
     sigma = max(1.0, float(p['cutoff_m']) / max(pixel_size, 1e-6))
+    # The log floor has to sit below the data, not on top of it. A satmap can
+    # arrive as 0-255 or as normalised 0-1 float depending on the source and on
+    # _match_grid's resampling; a hardcoded floor of 1.0 silently flattened the
+    # entire 0-1 case to log(1)=0, so the pass refused with "integrated to
+    # nothing" no matter how good the imagery was. Scale to a known range first.
+    lmax = float(np.nanmax(lum)) if lum.size else 0.0
+    if lmax <= 1.5:
+        lum = lum * 255.0
     log_lum = np.log(np.maximum(lum, 1.0))
     hp = log_lum - gaussian_filter(log_lum, sigma)
     hp = _reject_albedo(hp, rgb)

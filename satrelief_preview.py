@@ -17,11 +17,12 @@ export looked fine.
 """
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 from qgis.PyQt.QtCore import QThread, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QProgressBar, QDoubleSpinBox
+    QGroupBox, QProgressBar, QDoubleSpinBox, QComboBox
 )
 
 try:
@@ -34,6 +35,24 @@ except ImportError:  # pragma: no cover - console / test use
     from erosion_preview import (
         hillshade, to_pixmap, WipeView, _downsample, PREVIEW_MAX
     )
+
+
+def relief_only(delta):
+    """Render just the added micro-relief, stretched to its own range.
+
+    A side-by-side hillshade cannot show this effect and it is worth being
+    explicit about why. `hillshade` sets its contrast from the p99 of the
+    terrain's own gradient, which on real terrain is metres per pixel; the
+    micro-relief contributes centimetres per pixel. The change is then about 1%
+    of the contrast range -- genuinely present in the data, and invisible on
+    screen. Stretching the delta on its own is the only view in which a
+    sub-metre effect over hundreds of metres of landform can actually be seen.
+    """
+    d = np.nan_to_num(np.asarray(delta, np.float32))
+    lo, hi = np.percentile(d, 1), np.percentile(d, 99)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-9:
+        return np.full(d.shape, 128, np.uint8)
+    return np.clip((d - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
 
 
 class _Worker(QThread):
@@ -83,6 +102,11 @@ class SatReliefPreviewDialog(QDialog):
         self.view = WipeView(labels=("original", "sat-relief"))
         self.view.set_images(self.base_shade, None)
 
+        self.cmb_view = QComboBox()
+        self.cmb_view.addItem("Added relief only (recommended)", "delta")
+        self.cmb_view.addItem("Hillshade before / after", "shade")
+        self.cmb_view.currentIndexChanged.connect(self._redraw)
+
         self.sp_gain = self._spin(0.0, 2.0, 0.6, "", 2, 0.1)
         self.sp_cutoff = self._spin(5.0, 200.0, 30.0, " m", 0, 5.0)
         self.sp_clamp = self._spin(0.5, 20.0, 3.0, " m", 1, 0.5)
@@ -110,8 +134,13 @@ class SatReliefPreviewDialog(QDialog):
         self.lbl_info.setWordWrap(True)
         self.lbl_info.setStyleSheet("color:#888;")
 
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View"))
+        view_row.addWidget(self.cmb_view, 1)
+
         box = QGroupBox("Settings")
         bl = QVBoxLayout(box)
+        bl.addLayout(view_row)
         bl.addLayout(grid)
         bl.addWidget(self.lbl_info)
 
@@ -175,7 +204,10 @@ class SatReliefPreviewDialog(QDialog):
         self.lbl_info.setText(
             "Preview at %.2f m/px; the export runs at %.2f m/px. Detail below "
             "the cutoff is the only band touched, so the source DEM's own "
-            "landform is left alone." % (self.pixel_size, self.pixel_full))
+            "landform is left alone.\n\nThis effect is sub-metre against "
+            "hundreds of metres of landform, so it is close to invisible in a "
+            "before/after hillshade. Use the 'Added relief only' view to see "
+            "what it actually does." % (self.pixel_size, self.pixel_full))
 
     def _run(self):
         if self.worker and self.worker.isRunning():
@@ -208,12 +240,32 @@ class SatReliefPreviewDialog(QDialog):
                 % (fit, quality, info.get('azimuth', 0),
                    info.get('altitude', 0), info.get('amplitude', 0.0)))
             self.lbl_fit.setStyleSheet("font-weight:bold; color:#27ae60;")
-            self.view.set_images(self.base_shade,
-                                 to_pixmap(hillshade(out, ref=self.small)))
+            self._redraw()
             self.btn_apply.setEnabled(True)
         if self._pending:
             self._pending = False
             self._run()
+
+    def _redraw(self):
+        """Draw the current result in whichever view is selected."""
+        if self._last is None:
+            return
+        if self.cmb_view.currentData() == "delta":
+            # Left: the terrain's own detail in the same band, so the two sides
+            # are directly comparable -- what the DEM already has against what
+            # the imagery adds. Both stretched independently, since the point is
+            # the shape of the detail, not its amplitude.
+            delta = self._last - self.small
+            base_band = self.small - gaussian_filter(
+                self.small, max(1.0, self.sp_cutoff.value() / self.pixel_size))
+            self.view.labels = ("DEM detail", "added relief")
+            self.view.set_images(to_pixmap(relief_only(base_band)),
+                                 to_pixmap(relief_only(delta)))
+        else:
+            self.view.labels = ("original", "sat-relief")
+            self.view.set_images(self.base_shade,
+                                 to_pixmap(hillshade(self._last,
+                                                     ref=self.small)))
 
     def _failed(self, msg):
         self.bar.hide()

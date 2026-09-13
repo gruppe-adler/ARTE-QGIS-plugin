@@ -85,6 +85,15 @@ _refused = all(np.array_equal(_srm.apply(_terr, v.astype(np.float32), 1.0, _p)[0
                for v in _bad.values())
 chk("satrelief refuses degenerate imagery", _refused)
 
+# A satmap arrives as 0-255 or as normalised 0-1 float depending on source and
+# on _match_grid's resampling. A hardcoded log floor of 1.0 flattened the whole
+# 0-1 case to log(1)=0, so the pass refused with "integrated to nothing" however
+# good the imagery was -- and every existing test used 0-255, so none caught it.
+_o01, _i01 = _srm.apply(_terr, (_good/255.0).astype(np.float32), 1.0, _p)
+chk("satrelief handles 0-1 float satmap", _i01['applied'] and
+    abs((_o01-_terr).std() - (_out-_terr).std()) < 0.05,
+    "std %.4f vs %.4f m" % ((_o01-_terr).std(), (_out-_terr).std()))
+
 # protect mask must be honoured
 _pm = np.zeros((_N,_N), bool); _pm[100:140, :] = True
 _o2, _i2 = _srm.apply(_terr, _good, 1.0, _p, protect_mask=_pm)
