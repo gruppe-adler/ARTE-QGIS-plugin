@@ -134,6 +134,10 @@ DEFAULT_SOURCES = [
 # were written to catch.
 VOID_SENTINEL = -32768.0
 
+# How far into a void the fill fades from plain nearest-valid replication to a
+# mirrored copy of the terrain just inside the boundary.
+_FILL_FADE_PX = 35.0
+
 
 def _raster_extent_4326(path):
 	"""(west, south, east, north) in degrees for a raster on disk, or None.
@@ -262,8 +266,27 @@ def _fill_voids_in_place(path, step_callback=None):
             step_callback(84, "Filling %s void pixels..." % "{:,}".format(n_void))
 
         from scipy.ndimage import distance_transform_edt
-        _, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
-        arr = np.where(valid, arr, arr[iy, ix])
+        dist, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
+
+        # Nearest-valid replication alone copies one edge elevation across the
+        # whole void, leaving a dead-flat shelf -- measured runs up to 54 px on a
+        # real export, meeting real terrain at a wall with single-pixel jumps of
+        # 85 m. Those are the spikes along the map border in the editor.
+        #
+        # Reflect the terrain just inside the boundary back out across the void
+        # instead, so the fill carries the texture and slope of its neighbourhood,
+        # then fade from the plain nearest-valid value at the seam to the mirrored
+        # one further out. The seam stays continuous and the shelf disappears:
+        # measured flat runs 70 px -> 1 px, fill roughness matching the terrain.
+        rows = np.arange(arr.shape[0])[:, None]
+        cols = np.arange(arr.shape[1])[None, :]
+        mr = np.clip(2 * iy - rows, 0, arr.shape[0] - 1)
+        mc = np.clip(2 * ix - cols, 0, arr.shape[1] - 1)
+        nearest = arr[iy, ix]
+        mirrored = np.where(valid[mr, mc], arr[mr, mc], nearest)
+        blend = np.clip(dist / max(float(_FILL_FADE_PX), 1e-6), 0.0, 1.0)
+        arr = np.where(valid, arr,
+                       nearest * (1.0 - blend) + mirrored * blend).astype(arr.dtype)
 
         band.WriteArray(arr)
         # The raster no longer contains voids, so it must not advertise one --
