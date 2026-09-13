@@ -63,6 +63,23 @@ A 2 km export at 8192 px is 0.26 m/px, but AW3D30 is 30 m/px — about 119 of ev
 * **Parallel:** tiled across CPU cores, **5.1x on 11 workers**. A full 8192² pass is ~4 minutes.
 * **Protects** roads and riverbeds already shaped by Terrain Engineering.
 
+### 🛰️ Satellite Micro-Relief *(optional, off by default)*
+The satmap has already been downloaded, and on bare terrain most of its fine brightness is not colour — it is sun shading, which is a direct function of slope. This pass reads that shading back out and turns it into terrain, recovering relief that is genuinely on the ground but far below what a 30 m DEM can record.
+
+This is **additional to erosion, not a replacement.** Erosion invents plausible drainage where there is no evidence; this measures where a gully actually is. On a real export the two outputs correlate at **0.017** — near zero — so they are not two guesses at the same thing and do not double-count.
+
+It only runs when the imagery supports it. Before doing anything, the plugin correlates the DEM's own hillshade against the satmap and sweeps for the sun angle, which gives a **fit score**:
+
+| Imagery | fit | result |
+|---|---|---|
+| Real terrain | **0.288** | runs |
+| Smooth albedo blobs | 0.036 | refuses |
+| Uniform snow, random noise | 0.003 | refuses |
+
+Below 0.15 the heightmap is returned untouched. The preview shows you the score and its verdict, so you can tell whether your satmap is one this helps. The effect is confined to detail finer than the source DEM's cell size — it cannot disturb real landform — and is clamped to ±3 m by default. Roads and riverbeds are protected.
+
+*Caveats:* buildings and trees read as terrain, clouds become faint hills, and a mosaic seam can put the sun in the wrong place for part of the map. All are bounded by the clamp rather than solved — this is relief, not ground truth.
+
 ### 🛣️ Better Road & River Shaping
 Upstream flattens roads with a 2-D gaussian over the raster, which does not know where the road goes and mixes in terrain from both sides. This fork shapes each feature along its own length — sample a profile down the polyline, smooth and grade-cap it, then write it back across the corridor.
 
@@ -74,7 +91,7 @@ Upstream flattens roads with a 2-D gaussian over the raster, which does not know
 Rivers get a monotonically descending bed, bounded so it cannot trench through high ground.
 
 ### 🔍 Live Previews
-Two **Preview / Tune** dialogs show what a setting does before committing to a multi-minute run — one for erosion, one for shaping. The shaping preview plots a road cross-section and river long-profile, because a 7 m road is two pixels wide on a 2 km map and a canted carriageway or pooling riverbed is invisible from above.
+Three **Preview / Tune** dialogs show what a setting does before committing to a multi-minute run — one for erosion, one for shaping, one for satellite micro-relief. The shaping preview plots a road cross-section and river long-profile, because a 7 m road is two pixels wide on a 2 km map and a canted carriageway or pooling riverbed is invisible from above.
 
 ### ⚡ Faster Exports
 Terrain Engineering went from **291 s to 64 s** (rivers 108 s → 7 s, heavy roads 46 s → 6 s). Shaping also used to **crash QGIS** at full resolution — it compared every pixel in a road's bounding box against every point along it, a 209 GiB allocation for a road spanning the map. A distance transform does the same job in one bounded pass.

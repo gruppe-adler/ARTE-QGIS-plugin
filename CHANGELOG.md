@@ -3,6 +3,51 @@
 All notable changes to this fork. Versions follow the upstream plugin's
 numbering; 1.1.0 is the last upstream release this fork was taken from.
 
+## [1.2.3] — 2026-09-13
+
+### Added
+
+- **Satellite micro-relief — an optional second answer to the resolution gap.**
+  AW3D30 is 30 m/px, so a 2 km export at 8192 px is roughly 119 parts
+  interpolation to 1 part measured data. Erosion fills that by inventing
+  plausible drainage. This fills it differently: on bare terrain the satmap's
+  brightness is dominated by sun shading, which is a direct function of slope,
+  so integrating it recovers relief that is genuinely there. Measured on a real
+  Bamiyan export, ~85% of fine brightness variation is shading rather than
+  albedo, the sun angle recovered from the data alone correlates at 0.63, and
+  the reconstruction explains the observed shading at r = 0.58.
+- **It runs in addition to erosion, not instead of it.** The two outputs are
+  statistically orthogonal — r = 0.017 on a real export — so they are not two
+  estimates of the same thing. Erosion is a generative prior; this is a
+  measurement. The pass runs *before* erosion, because erosion derives its
+  vertical scale from the terrain's own statistics and its delta smoothing
+  protects only what erosion itself changed.
+- **A measured gate, so an arbitrary satmap cannot make the output worse.**
+  Correlating the DEM's hillshade against satmap luminance over a sweep of sun
+  angles yields a fit score that separates the cases by an order of magnitude:
+  real terrain 0.288, smooth albedo blobs 0.036, uniform snow and random noise
+  0.003. Below 0.15 the pass declines and returns the heightmap bit-identical;
+  between 0.15 and 0.30 it runs at reduced strength. The preview dialog leads
+  with that number and its verdict rather than with the sliders, because it is
+  the only honest signal of whether the imagery supported the effect at all.
+- **Bounded by construction.** The effect is confined to detail finer than the
+  source DEM's own cell size, so it cannot disturb real landform —
+  `corr(micro-relief, DEM low frequencies)` measures 0.010 — and the result is
+  clamped to a maximum change of ±3 m by default. Roads and riverbeds already
+  shaped by Terrain Engineering are protected, since a road is flat in reality
+  but a bright ribbon in imagery.
+- **Defaults to off**, with subtle / moderate / strong presets and a
+  **Preview / Tune** dialog.
+
+Known failure modes, all bounded by the clamp rather than eliminated: mosaic
+seams in the imagery can disagree on sun angle (one patch of the Bamiyan satmap
+was 90° out; running it with the global estimate degraded the result but did not
+invert it, so relief does not become pits); buildings and vegetation read as
+terrain, a wall as slope and its shadow as a pit; and clouds become faint hills.
+Shape-from-shading with unknown, spatially varying albedo is formally ill-posed
+— this is relief, not ground truth, which is why the band-limiting and the gate
+are not optional.
+
 ## [1.2.2] — 2026-09-13
 
 ### Fixed
