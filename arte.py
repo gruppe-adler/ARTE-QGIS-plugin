@@ -211,7 +211,10 @@ def _fill_voids_in_place(path, step_callback=None):
 
 
 def _find_heightmap(directory):
-	"""Newest real heightmap export in `directory`, or None.
+	"""Newest raw (un-eroded) heightmap export in `directory`, or None.
+
+	"Raw" is the point: erosion and shaping are always tuned against the
+	unmodified DEM export, never against a previous eroded result.
 
 	ARTE also writes ``heightmap_diff_*.tif``, a debug raster holding only what
 	the terrain engineer changed. It sorts after ``heightmap_<stamp>.png`` in a
@@ -236,6 +239,12 @@ def _find_heightmap(directory):
 		if not low.endswith((".png", ".tif", ".tiff")):
 			continue
 		if "_diff" in low or "debug" in low or "preview" in low:
+			continue
+		# Never tune against an already-eroded export. Both previews pick the
+		# newest heightmap here, so without this a second tuning round would
+		# erode terrain that has already been eroded, compounding each time
+		# instead of always starting from the raw DEM.
+		if "_eroded" in low:
 			continue
 		path = os.path.join(directory, name)
 		try:
@@ -2772,10 +2781,15 @@ class ArmaExportPlugin:
 			return
 
 		timestamp = time.strftime("%Y%m%d_%H%M%S")
+		# Tag eroded output in the filename. Without it the previews, which
+		# pick the newest heightmap in the directory, would load an already
+		# eroded export and erode it again -- each round compounding on the
+		# last instead of starting from the raw DEM every time.
+		_suffix = "_eroded" if _mode == 'eroded' else ""
 		output_sat_png = os.path.join(output_dir, f"satmap_{timestamp}.png")
-		output_tif = os.path.join(output_dir, f"heightmap_{timestamp}.tif")
-		output_asc = os.path.join(output_dir, f"heightmap_{timestamp}.asc")
-		output_png = os.path.join(output_dir, f"heightmap_{timestamp}.png")
+		output_tif = os.path.join(output_dir, f"heightmap_{timestamp}{_suffix}.tif")
+		output_asc = os.path.join(output_dir, f"heightmap_{timestamp}{_suffix}.asc")
+		output_png = os.path.join(output_dir, f"heightmap_{timestamp}{_suffix}.png")
 		output_txt = os.path.join(output_dir, f"enfusion_import_{timestamp}.txt")
 		temp_rgb_tif = os.path.join(output_dir, f"temp_source_{timestamp}.tif")
 
