@@ -87,6 +87,7 @@ def _enum(owner, name, *scopes):
 _FMT_GRAY8 = _enum(QImage, 'Format_Grayscale8', 'Format')
 SP_EXPANDING = _enum(QSizePolicy, 'Expanding', 'Policy')
 CUR_SIZEHOR = _enum(Qt, 'SizeHorCursor', 'CursorShape')
+CUR_CROSS = _enum(Qt, 'CrossCursor', 'CursorShape')
 ALIGN_CENTER = _enum(Qt, 'AlignCenter', 'AlignmentFlag')
 KEEP_ASPECT = _enum(Qt, 'KeepAspectRatio', 'AspectRatioMode')
 SMOOTH_XFORM = _enum(Qt, 'SmoothTransformation', 'TransformationMode')
@@ -140,7 +141,8 @@ class WipeView(QWidget):
         # a small patch at native resolution, via the `patch_requested` signal.
         # A fixed-size patch keeps that work bounded however large the export.
         self.patch_frac = 0.0     # patch size as a fraction of the map, 0=off
-        self._hover = None        # cursor position, for the hover rectangle
+        self.pick_mode = False    # while true, clicks pick a region to inspect
+        self._hover = None        # cursor position, for the target cross
         self.setMouseTracking(True)
         self.setMinimumSize(PREVIEW_MAX, PREVIEW_MAX)
         self.setSizePolicy(SP_EXPANDING, SP_EXPANDING)
@@ -186,33 +188,55 @@ class WipeView(QWidget):
         p.drawText(x + side - 6 - p.fontMetrics().horizontalAdvance(right),
                    y + 18, right)
         # Show the region a click would inspect, so the target is unambiguous
-        # before committing to a recompute.
-        if self.patch_frac > 0 and self._hover is not None:
-            box = max(8, int(side * self.patch_frac))
-            hx = min(max(self._hover[0], x + box // 2), x + side - box // 2)
-            hy = min(max(self._hover[1], y + box // 2), y + side - box // 2)
+        # before committing to a recompute. A 100 m patch on a 2200 m map is
+        # only ~23 px on screen, which is easy to miss entirely, so the box gets
+        # a floor and crosshair guides run out to the frame edges.
+        if self.pick_mode and self.patch_frac > 0 and self._hover is not None:
+            box = max(28, int(side * self.patch_frac))
+            half = box // 2
+            hx = min(max(self._hover[0], x + half), x + side - half)
+            hy = min(max(self._hover[1], y + half), y + side - half)
+
+            # Full-width guides, broken either side of the target so the centre
+            # stays readable.
+            p.setPen(QPen(QColor(255, 200, 0, 80), 1))
+            p.drawLine(x, hy, hx - half, hy)
+            p.drawLine(hx + half, hy, x + side, hy)
+            p.drawLine(hx, y, hx, hy - half)
+            p.drawLine(hx, hy + half, hx, y + side)
+
             p.setPen(QPen(QColor(255, 200, 0), 2))
-            p.drawRect(hx - box // 2, hy - box // 2, box, box)
+            p.drawRect(hx - half, hy - half, box, box)
+
+            # Centre tick, with a gap so it reads as a target rather than a dot.
+            tick, gap = max(5, box // 6), max(2, box // 12)
+            p.drawLine(hx - tick - gap, hy, hx - gap, hy)
+            p.drawLine(hx + gap, hy, hx + tick + gap, hy)
+            p.drawLine(hx, hy - tick - gap, hx, hy - gap)
+            p.drawLine(hx, hy + gap, hx, hy + tick + gap)
+
             p.setPen(QColor(255, 255, 255))
-            p.drawText(hx - box // 2, hy - box // 2 - 6,
-                       "click to inspect at full resolution")
+            p.drawText(max(x + 4, hx - half), max(y + 30, hy - half - 6),
+                       "click: inspect at full resolution")
 
     def mousePressEvent(self, e):
-        # While a patch size is set, a click picks the region to inspect;
-        # dragging the wipe divider is the behaviour everywhere else.
-        if self.patch_frac > 0:
+        # Pick mode is explicit rather than inferred from how far the mouse
+        # moved: in pick mode a click chooses the region and the wipe divider is
+        # frozen, everywhere else the mouse drags the divider as before.
+        if self.pick_mode and self.patch_frac > 0:
             r = self._rect()
-            if r is not None:
-                x, y, side = r
-                cx = (e.pos().x() - x) / float(side)
-                cy = (e.pos().y() - y) / float(side)
-                if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0:
-                    self.patch_requested.emit(cx, cy)
-                    return
+            if r is None:
+                return
+            x, y, side = r
+            cx = (e.pos().x() - x) / float(side)
+            cy = (e.pos().y() - y) / float(side)
+            if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0:
+                self.patch_requested.emit(cx, cy)
+            return
         self._drag(e)
 
     def mouseMoveEvent(self, e):
-        if self.patch_frac > 0:
+        if self.pick_mode and self.patch_frac > 0:
             self._hover = (e.pos().x(), e.pos().y())
             self.update()
             return

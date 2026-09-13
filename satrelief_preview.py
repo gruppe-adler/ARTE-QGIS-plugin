@@ -28,12 +28,14 @@ from qgis.PyQt.QtWidgets import (
 try:
     from . import satrelief
     from .erosion_preview import (
-        hillshade, to_pixmap, WipeView, _downsample, PREVIEW_MAX
+        hillshade, to_pixmap, WipeView, _downsample, PREVIEW_MAX,
+        CUR_CROSS, CUR_SIZEHOR
     )
 except ImportError:  # pragma: no cover - console / test use
     import satrelief
     from erosion_preview import (
-        hillshade, to_pixmap, WipeView, _downsample, PREVIEW_MAX
+        hillshade, to_pixmap, WipeView, _downsample, PREVIEW_MAX,
+        CUR_CROSS, CUR_SIZEHOR
     )
 
 
@@ -99,6 +101,7 @@ class SatReliefPreviewDialog(QDialog):
         self._pending = False
         self._last = None
         self._last_info = None
+        self._retired = []
 
         # Downsample heightmap and satmap by the SAME factor, and carry the
         # cutoff in metres, so the preview reproduces the export's geometry
@@ -123,7 +126,19 @@ class SatReliefPreviewDialog(QDialog):
         # is instant rather than a second full recompute.
         self._overview = None
         self._overview_info = None
-        self.patch_m = 100.0
+        # Patch size is bounded in PIXELS, not metres, because pixels are what
+        # the recompute costs: measured at 0.27 m/px, 925 px takes 1.97 s but
+        # 3703 px takes 34.4 s. A fixed metre size also cannot suit both a
+        # 2 km map and the 30 km ones the community builds -- 250 m is a
+        # quarter of the former and under 1% of the latter.
+        #
+        # So: a fixed pixel budget, which is a constant recompute cost at any
+        # map size, then clamped to a visible fraction of the map so the box is
+        # never too small to hit or larger than the map itself.
+        PATCH_PX = 1024                     # ~2 s at full resolution
+        fh0 = max(np.asarray(heightmap).shape)
+        frac = min(0.5, max(0.04, PATCH_PX / float(fh0)))
+        self.patch_m = (pixel_size or 1.0) * fh0 * frac
         self.inspecting = False
 
         self.base_shade = to_pixmap(hillshade(self.small))
@@ -134,6 +149,16 @@ class SatReliefPreviewDialog(QDialog):
         span_m = self.pixel_full * max(self._full_z.shape)
         self.view.patch_frac = min(1.0, self.patch_m / max(span_m, 1e-6))
         self.view.patch_requested.connect(self._inspect)
+
+        # Explicit mode, so a click on the image is never ambiguous between
+        # moving the wipe divider and choosing a region to recompute.
+        self.btn_pick = QPushButton("🔍 Zoom to area…")
+        self.btn_pick.setCheckable(True)
+        self.btn_pick.setToolTip(
+            "Pick a %.0f m area to recompute at the export's own resolution.\n"
+            "The before/after divider is held still while picking."
+            % self.patch_m)
+        self.btn_pick.toggled.connect(self._set_pick_mode)
 
         self.btn_back = QPushButton("← Back to whole map")
         self.btn_back.clicked.connect(self._show_overview)
@@ -192,6 +217,7 @@ class SatReliefPreviewDialog(QDialog):
         btn_skip.clicked.connect(self.reject)
 
         btns = QHBoxLayout()
+        btns.addWidget(self.btn_pick)
         btns.addWidget(self.btn_back)
         btns.addWidget(self.bar, 1)
         btns.addStretch()
@@ -256,6 +282,18 @@ class SatReliefPreviewDialog(QDialog):
                 "only' to see what it does."
                 % (self.pixel_size, self.pixel_full, self.patch_m))
 
+    def _retire_worker(self):
+        """Release the current worker without dropping its last reference.
+
+        Dropping a QThread that Qt has not finished with takes the process down
+        with no Python traceback -- the retirement list holds each one until it
+        is genuinely idle.
+        """
+        if self.worker is not None:
+            self._retired.append(self.worker)
+            self._retired = [w for w in self._retired if w.isRunning()]
+        self.worker = None
+
     def _run(self):
         if self.worker and self.worker.isRunning():
             self._pending = True
@@ -270,6 +308,7 @@ class SatReliefPreviewDialog(QDialog):
                    self._overview_info.get('altitude'))
             if sun[0] is None or sun[1] is None:
                 sun = None
+        self._retire_worker()
         self.worker = _Worker(self.small, self.rgb, self.pixel_size,
                               self.params(), sun=sun)
         self.worker.done.connect(self._ready)
@@ -277,6 +316,20 @@ class SatReliefPreviewDialog(QDialog):
         self.worker.start()
 
     def _ready(self, out, info):
+        # Drop a result computed against a grid we have since moved away from.
+        # Switching between the overview and an inspected patch changes
+        # `self.small` immediately, but a worker already running finishes
+        # against the old one and would otherwise be differenced against the
+        # new grid -- a 512 vs 372 broadcast error.
+        if out is not None and out.shape != self.small.shape:
+            # The grid moved on, so this result is useless -- but the current
+            # grid still needs computing. Clear the finished worker first, or
+            # _run sees it as live and only re-arms _pending, and nothing ever
+            # starts.
+            self._pending = False
+            self._retire_worker()
+            self._run()
+            return
         self.bar.hide()
         self._last = out
         self._last_info = info
@@ -314,7 +367,16 @@ class SatReliefPreviewDialog(QDialog):
             self.btn_apply.setEnabled(True)
         if self._pending:
             self._pending = False
+            self._retire_worker()   # this one has finished; let _run start a new one
             self._run()
+
+    def _set_pick_mode(self, on):
+        """Enter or leave area-picking. The wipe divider is frozen while on."""
+        self.view.pick_mode = bool(on)
+        self.view.setCursor(CUR_CROSS if on else CUR_SIZEHOR)
+        if not on:
+            self.view._hover = None
+        self.view.update()
 
     def _inspect(self, cx, cy):
         """Recompute a 100 m patch at native resolution, centred on the click.
@@ -342,6 +404,9 @@ class SatReliefPreviewDialog(QDialog):
         self.inspecting = True
         self.btn_back.show()
         self.view.patch_frac = 0.0
+        # Picking is done; hand the divider back.
+        self.btn_pick.setChecked(False)
+        self.btn_pick.hide()
         self._refresh_info()
         self._run()
 
@@ -354,18 +419,24 @@ class SatReliefPreviewDialog(QDialog):
         self.base_shade = to_pixmap(hillshade(self.small))
         self.inspecting = False
         self.btn_back.hide()
+        self.btn_pick.show()
         span_m = self.pixel_full * max(self._full_z.shape)
         self.view.patch_frac = min(1.0, self.patch_m / max(span_m, 1e-6))
         self._refresh_info()
-        if self._overview is not None:
-            self._last = self._overview
+        # Only serve the cache if it matches the grid we just restored; and if a
+        # patch worker is still running, let it finish and be discarded rather
+        # than racing it.
+        if (self._overview is not None
+                and self._overview.shape == self.small.shape):
             self._ready(self._overview, self._overview_info)
         else:
             self._run()
 
     def _redraw(self):
         """Draw the current result in whichever view is selected."""
-        if self._last is None:
+        # The view dropdown can fire while a grid switch is in flight, so check
+        # here too rather than relying on _ready having filtered it.
+        if self._last is None or self._last.shape != self.small.shape:
             return
         if self.cmb_view.currentData() == "delta":
             # Left: the terrain's own detail in the same band, so the two sides
