@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<plugins>
+  <pyqgis_plugin name="ARTE+ - Arma Reforger Terrain Exporter (erosion fork)" version="1.2.0">
+    <description>Advanced QGIS terrain exporter for Arma Reforger (Enfusion Engine), with hydraulic erosion and per-feature road/river shaping.</description>
+    <about>Fork of ARTE by Icebird. Adds hydraulic erosion, per-feature road and river shaping, live previews, and a NoData border fix.</about>
+    <version>1.2.0</version>
+    <qgis_minimum_version>3.0</qgis_minimum_version>
+    <qgis_maximum_version>4.99</qgis_maximum_version>
+    <author_name>Icebird; erosion/shaping fork by nomisum</author_name>
+    <homepage>https://github.com/gruppe-adler/ARTE-QGIS-plugin</homepage>
+    <repository>https://github.com/gruppe-adler/ARTE-QGIS-plugin</repository>
+    <tracker>https://github.com/gruppe-adler/ARTE-QGIS-plugin/issues</tracker>
+    <file_name>ARTE.zip</file_name>
+    <download_url>https://github.com/gruppe-adler/ARTE-QGIS-plugin/releases/latest/download/ARTE.zip</download_url>
+    <experimental>false</experimental>
+    <deprecated>false</deprecated>
+  </pyqgis_plugin>
+</plugins>

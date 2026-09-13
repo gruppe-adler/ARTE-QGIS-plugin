@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 
-# scratch/debug scripts
+# scratch/debug scripts (never __init__.py, which QGIS needs to load the plugin)
 _*.py
+!__init__.py
+build/
