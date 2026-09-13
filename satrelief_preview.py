@@ -69,17 +69,18 @@ class _Worker(QThread):
     done = pyqtSignal(object, object)
     failed = pyqtSignal(str)
 
-    def __init__(self, z, rgb, pixel_size, params):
+    def __init__(self, z, rgb, pixel_size, params, sun=None):
         super().__init__()
         self.z = z
         self.rgb = rgb
         self.pixel_size = pixel_size
         self.params = params
+        self.sun = sun
 
     def run(self):
         try:
             out, info = satrelief.apply(self.z, self.rgb, self.pixel_size,
-                                        self.params)
+                                        self.params, sun=self.sun)
             self.done.emit(out, info)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -97,6 +98,7 @@ class SatReliefPreviewDialog(QDialog):
         self.worker = None
         self._pending = False
         self._last = None
+        self._last_info = None
 
         # Downsample heightmap and satmap by the SAME factor, and carry the
         # cutoff in metres, so the preview reproduces the export's geometry
@@ -108,9 +110,34 @@ class SatReliefPreviewDialog(QDialog):
         sat = np.asarray(satmap, np.float32)[:, :, :3]
         self.rgb = satrelief._match_grid(sat, (h, w))
 
+        # Keep the full-resolution inputs. Zooming has to RECOMPUTE the visible
+        # region at native scale, not magnify downsampled pixels: measured on
+        # the same ground, the downsampled pass resolves 4.3x fewer features
+        # along a scanline than the export does. Amplitude survives downsampling
+        # (0.52 m against 0.55 m) so the fit and ratio are trustworthy either
+        # way, but the SHAPE is what this view is for, and magnifying blocks
+        # would show a shape the export never produces.
+        self._full_z = np.asarray(heightmap, np.float32)
+        self._full_sat = sat
+        # Cache of the whole-map result, so returning from an inspected patch
+        # is instant rather than a second full recompute.
+        self._overview = None
+        self._overview_info = None
+        self.patch_m = 100.0
+        self.inspecting = False
+
         self.base_shade = to_pixmap(hillshade(self.small))
         self.view = WipeView(labels=("original", "sat-relief"))
         self.view.set_images(self.base_shade, None)
+        # A fixed 100 m patch: bounded work whatever the export's size, and at
+        # 0.27 m/px it is ~370 px, which computes in well under a second.
+        span_m = self.pixel_full * max(self._full_z.shape)
+        self.view.patch_frac = min(1.0, self.patch_m / max(span_m, 1e-6))
+        self.view.patch_requested.connect(self._inspect)
+
+        self.btn_back = QPushButton("← Back to whole map")
+        self.btn_back.clicked.connect(self._show_overview)
+        self.btn_back.hide()
 
         self.cmb_view = QComboBox()
         self.cmb_view.addItem("Added relief only (recommended)", "delta")
@@ -165,6 +192,7 @@ class SatReliefPreviewDialog(QDialog):
         btn_skip.clicked.connect(self.reject)
 
         btns = QHBoxLayout()
+        btns.addWidget(self.btn_back)
         btns.addWidget(self.bar, 1)
         btns.addStretch()
         btns.addWidget(btn_skip)
@@ -211,21 +239,39 @@ class SatReliefPreviewDialog(QDialog):
         return {'params': self.params()}
 
     def _refresh_info(self):
-        self.lbl_info.setText(
-            "Preview at %.2f m/px; the export runs at %.2f m/px. Detail below "
-            "the cutoff is the only band touched, so the source DEM's own "
-            "landform is left alone.\n\nThis effect is sub-metre against "
-            "hundreds of metres of landform, so it is close to invisible in a "
-            "before/after hillshade. Use the 'Added relief only' view to see "
-            "what it actually does." % (self.pixel_size, self.pixel_full))
+        if self.inspecting:
+            self.lbl_info.setText(
+                "Inspecting a %.0f m patch at %.2f m/px — the export's own "
+                "resolution, so this is exactly what it will produce here.\n\n"
+                "Detail below the cutoff is the only band touched, so the "
+                "source DEM's own landform is left alone."
+                % (self.patch_m, self.pixel_size))
+        else:
+            self.lbl_info.setText(
+                "Overview at %.2f m/px; the export runs at %.2f m/px, so fine "
+                "detail is under-resolved here — click anywhere to recompute a "
+                "%.0f m patch at full resolution.\n\nThis effect is sub-metre "
+                "against hundreds of metres of landform, so it is close to "
+                "invisible in a before/after hillshade. Use 'Added relief "
+                "only' to see what it does."
+                % (self.pixel_size, self.pixel_full, self.patch_m))
 
     def _run(self):
         if self.worker and self.worker.isRunning():
             self._pending = True
             return
         self.bar.show()
+        # A 100 m patch is too small a sample to re-estimate the sun from, and
+        # the whole map already answered that question -- so carry the
+        # overview's estimate into the patch. It is also the slowest step.
+        sun = None
+        if self.inspecting and self._overview_info:
+            sun = (self._overview_info.get('azimuth'),
+                   self._overview_info.get('altitude'))
+            if sun[0] is None or sun[1] is None:
+                sun = None
         self.worker = _Worker(self.small, self.rgb, self.pixel_size,
-                              self.params())
+                              self.params(), sun=sun)
         self.worker.done.connect(self._ready)
         self.worker.failed.connect(self._failed)
         self.worker.start()
@@ -233,6 +279,7 @@ class SatReliefPreviewDialog(QDialog):
     def _ready(self, out, info):
         self.bar.hide()
         self._last = out
+        self._last_info = info
         fit = info.get('fit', 0.0)
         if not info.get('applied'):
             self.lbl_fit.setText(
@@ -251,17 +298,69 @@ class SatReliefPreviewDialog(QDialog):
             base_band = self.small - gaussian_filter(
                 self.small, max(1.0, self.sp_cutoff.value() / self.pixel_size))
             ratio = delta.std() / max(float(base_band.std()), 1e-9)
+            # %.2f printed a real 0.05 ratio as "0.00x". Use a percentage,
+            # which stays readable across the range these ratios actually take.
             self.lbl_fit.setText(
                 "Fit %.3f — %s.\nSun estimated at %.0f° azimuth, "
-                "%.0f° altitude.\nRelief amplitude %.2f m — %.2f× the detail "
-                "the DEM already has at this scale."
+                "%.0f° altitude.\nRelief amplitude %.2f m — %.0f%% of the "
+                "detail the DEM already has at this scale.\n\nEach pane is "
+                "stretched to its own range, so the two look equally strong "
+                "on screen; the percentage above is the real amplitude."
                 % (fit, quality, info.get('azimuth', 0),
-                   info.get('altitude', 0), info.get('amplitude', 0.0), ratio))
+                   info.get('altitude', 0), info.get('amplitude', 0.0),
+                   100.0 * ratio))
             self.lbl_fit.setStyleSheet("font-weight:bold; color:#27ae60;")
             self._redraw()
             self.btn_apply.setEnabled(True)
         if self._pending:
             self._pending = False
+            self._run()
+
+    def _inspect(self, cx, cy):
+        """Recompute a 100 m patch at native resolution, centred on the click.
+
+        The overview is computed downsampled, where the 30 m detail band is only
+        a few pixels wide; measured on the same ground it resolves 4.3x fewer
+        features along a scanline than the export does. Magnifying that would
+        show a shape the export never produces, so the patch is recomputed from
+        the full-resolution inputs instead.
+        """
+        if self._overview is None:
+            self._overview = self._last
+            self._overview_info = self._last_info
+        fh, fw = self._full_z.shape
+        half = max(16, int(self.patch_m / max(self.pixel_full, 1e-6) / 2))
+        px = int(min(max(cx * fw, half), fw - half))
+        py = int(min(max(cy * fh, half), fh - half))
+        ys, xs = slice(py - half, py + half), slice(px - half, px + half)
+
+        self.small = self._full_z[ys, xs]
+        sat_patch = satrelief._match_grid(self._full_sat, self._full_z.shape)
+        self.rgb = sat_patch[ys, xs]
+        self.pixel_size = self.pixel_full
+        self.base_shade = to_pixmap(hillshade(self.small))
+        self.inspecting = True
+        self.btn_back.show()
+        self.view.patch_frac = 0.0
+        self._refresh_info()
+        self._run()
+
+    def _show_overview(self):
+        """Return to the whole map, from cache rather than recomputing."""
+        step = max(1, int(max(self._full_z.shape) / float(PREVIEW_MAX)))
+        self.small = _downsample(self._full_z, PREVIEW_MAX)
+        self.pixel_size = self.pixel_full * step
+        self.rgb = satrelief._match_grid(self._full_sat, self.small.shape)
+        self.base_shade = to_pixmap(hillshade(self.small))
+        self.inspecting = False
+        self.btn_back.hide()
+        span_m = self.pixel_full * max(self._full_z.shape)
+        self.view.patch_frac = min(1.0, self.patch_m / max(span_m, 1e-6))
+        self._refresh_info()
+        if self._overview is not None:
+            self._last = self._overview
+            self._ready(self._overview, self._overview_info)
+        else:
             self._run()
 
     def _redraw(self):
@@ -276,12 +375,14 @@ class SatReliefPreviewDialog(QDialog):
             delta = self._last - self.small
             base_band = self.small - gaussian_filter(
                 self.small, max(1.0, self.sp_cutoff.value() / self.pixel_size))
-            # One scale for both panes, set by the DEM's own detail, so the
-            # comparison shows the true relative amplitude.
-            scale = float(np.percentile(np.abs(base_band), 99))
+            # Each pane on its own scale, so the SHAPE of the added relief is
+            # legible -- at 0.05x a shared scale renders it as flat grey, which
+            # says nothing except "small", and the ratio is already stated as a
+            # number above. Amplitude is the label's job; this view is for
+            # judging whether the recovered detail looks like terrain.
             self.view.labels = ("DEM detail", "added relief")
-            self.view.set_images(to_pixmap(relief_only(base_band, scale)),
-                                 to_pixmap(relief_only(delta, scale)))
+            self.view.set_images(to_pixmap(relief_only(base_band)),
+                                 to_pixmap(relief_only(delta)))
         else:
             self.view.labels = ("original", "sat-relief")
             self.view.set_images(self.base_shade,

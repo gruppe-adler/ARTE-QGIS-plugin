@@ -114,7 +114,14 @@ def _downsample(z, target):
 
 
 class WipeView(QWidget):
-    """Before/after image with a draggable vertical divider."""
+    """Before/after image with a draggable vertical divider.
+
+    Emits `patch_requested(cx, cy)` -- centre in 0..1 image coordinates -- when
+    the user clicks while `patch_frac` is set, so the owner can recompute that
+    region at full resolution.
+    """
+
+    patch_requested = pyqtSignal(float, float)
 
     def __init__(self, parent=None, labels=("original", "modified")):
         super().__init__(parent)
@@ -122,6 +129,19 @@ class WipeView(QWidget):
         self.after = None
         self.labels = labels
         self.split = 0.5
+        # Zoom exists because fitting the whole map into ~500 px hides exactly
+        # what these previews are for. A 30 m detail band is about 7 px at
+        # preview scale, so fine effects are smaller than the pixels drawn and
+        # no amount of contrast stretching can show them.
+        #
+        # Magnifying the downsampled image would not help: measured on the same
+        # ground, the downsampled pass resolves 4.3x fewer features along a
+        # scanline than the export does. So a click asks the owner to RECOMPUTE
+        # a small patch at native resolution, via the `patch_requested` signal.
+        # A fixed-size patch keeps that work bounded however large the export.
+        self.patch_frac = 0.0     # patch size as a fraction of the map, 0=off
+        self._hover = None        # cursor position, for the hover rectangle
+        self.setMouseTracking(True)
         self.setMinimumSize(PREVIEW_MAX, PREVIEW_MAX)
         self.setSizePolicy(SP_EXPANDING, SP_EXPANDING)
         self.setCursor(CUR_SIZEHOR)
@@ -130,6 +150,7 @@ class WipeView(QWidget):
         self.before = before
         self.after = after
         self.update()
+
 
     def _rect(self):
         if self.before is None:
@@ -154,8 +175,7 @@ class WipeView(QWidget):
             p.drawPixmap(x, y, self.before.scaled(side, side, KEEP_ASPECT,
                                                   SMOOTH_XFORM))
         if self.after is not None and cut < side:
-            scaled = self.after.scaled(side, side, KEEP_ASPECT,
-                                       SMOOTH_XFORM)
+            scaled = self.after.scaled(side, side, KEEP_ASPECT, SMOOTH_XFORM)
             p.drawPixmap(x + cut, y, scaled, cut, 0, side - cut, side)
 
         p.setPen(QPen(QColor(255, 200, 0), 2))
@@ -165,13 +185,44 @@ class WipeView(QWidget):
         p.drawText(x + 6, y + 18, left)
         p.drawText(x + side - 6 - p.fontMetrics().horizontalAdvance(right),
                    y + 18, right)
+        # Show the region a click would inspect, so the target is unambiguous
+        # before committing to a recompute.
+        if self.patch_frac > 0 and self._hover is not None:
+            box = max(8, int(side * self.patch_frac))
+            hx = min(max(self._hover[0], x + box // 2), x + side - box // 2)
+            hy = min(max(self._hover[1], y + box // 2), y + side - box // 2)
+            p.setPen(QPen(QColor(255, 200, 0), 2))
+            p.drawRect(hx - box // 2, hy - box // 2, box, box)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(hx - box // 2, hy - box // 2 - 6,
+                       "click to inspect at full resolution")
 
     def mousePressEvent(self, e):
+        # While a patch size is set, a click picks the region to inspect;
+        # dragging the wipe divider is the behaviour everywhere else.
+        if self.patch_frac > 0:
+            r = self._rect()
+            if r is not None:
+                x, y, side = r
+                cx = (e.pos().x() - x) / float(side)
+                cy = (e.pos().y() - y) / float(side)
+                if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0:
+                    self.patch_requested.emit(cx, cy)
+                    return
         self._drag(e)
 
     def mouseMoveEvent(self, e):
+        if self.patch_frac > 0:
+            self._hover = (e.pos().x(), e.pos().y())
+            self.update()
+            return
         if e.buttons() & LEFT_BUTTON:
             self._drag(e)
+
+    def leaveEvent(self, e):
+        if self._hover is not None:
+            self._hover = None
+            self.update()
 
     def _drag(self, e):
         r = self._rect()

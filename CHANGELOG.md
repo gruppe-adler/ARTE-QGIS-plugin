@@ -38,6 +38,35 @@ numbering; 1.1.0 is the last upstream release this fork was taken from.
   but a bright ribbon in imagery.
 - **Defaults to off**, with subtle / moderate / strong presets and a
   **Preview / Tune** dialog.
+- **Click to inspect a preview at full resolution.** Previews downsample to stay
+  interactive, which hides exactly the detail these settings control: measured
+  on the same ground, the downsampled pass resolves 4.3x fewer features along a
+  scanline than the export does (13 against 3). Magnifying those pixels would
+  show a shape the export never produces, so hovering marks a 100 m box and
+  clicking recomputes that patch from the full-resolution inputs, at the
+  export's own m/px. A fixed patch size keeps the work bounded however large the
+  export -- 0.52 s at 0.27 m/px -- and the whole-map result is cached, so
+  returning to the overview is immediate. Reusing the overview's sun estimate
+  rather than re-solving it per patch cut that from 5.10 s. Shared by all three
+  preview dialogs.
+
+### Fixed
+
+- **Satellite micro-relief did nothing on 0-1 float imagery.** The log floor was
+  hardcoded at `max(lum, 1.0)`. A satmap arrives either as 0-255 or as
+  normalised 0-1 float, depending on the source and on what the resampling
+  produces; in the 0-1 case every pixel clamped to exactly 1.0, `log(1) = 0`,
+  and the high-pass was identically zero -- so the pass refused with "shading
+  field integrated to nothing" however good the imagery was. Measured on
+  identical terrain and shading, with only the numeric range differing: 0-255
+  gave 0.6000 m, 0-1 gave 0.0000 m. Luminance is now scaled to a known range
+  before the log, and both give 0.6000 m. Every existing test used 0-255, which
+  is why none caught it; there is now one that uses 0-1.
+- **The preview's amplitude readout printed a real 0.05 ratio as `0.00x`**, and
+  the shared contrast scale crushed the added-relief pane to flat grey (pixel
+  std 2.6 of 255). The ratio is now given as a percentage, and each pane is
+  stretched to its own range so the shape stays legible, with the label saying
+  outright that the two panes therefore look equally strong on screen.
 
 Known failure modes, all bounded by the clamp rather than eliminated: mosaic
 seams in the imagery can disagree on sun angle (one patch of the Bamiyan satmap

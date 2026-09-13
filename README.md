@@ -78,6 +78,8 @@ It only runs when the imagery supports it. Before doing anything, the plugin cor
 
 Below 0.15 the heightmap is returned untouched. The preview shows you the score and its verdict, so you can tell whether your satmap is one this helps. The effect is confined to detail finer than the source DEM's cell size — it cannot disturb real landform — and is clamped to ±3 m by default. Roads and riverbeds are protected.
 
+**Expect a subtle result.** The added relief measures roughly **5–10% of the amplitude of the detail the DEM already has** at that scale, and well under 1% of total relief. It adds a layer on top of the terrain; it does not reshape it, and in a before/after hillshade it is nearly invisible. The preview's *Added relief only* view stretches the change so its shape is legible — useful for judging whether the recovered detail looks like terrain — while the fit box states the real amplitude as a percentage, because the stretched view deliberately exaggerates it.
+
 *Caveats:* buildings and trees read as terrain, clouds become faint hills, and a mosaic seam can put the sun in the wrong place for part of the map. All are bounded by the clamp rather than solved — this is relief, not ground truth.
 
 ### 🛣️ Better Road & River Shaping
@@ -92,6 +94,8 @@ Rivers get a monotonically descending bed, bounded so it cannot trench through h
 
 ### 🔍 Live Previews
 Three **Preview / Tune** dialogs show what a setting does before committing to a multi-minute run — one for erosion, one for shaping, one for satellite micro-relief. The shaping preview plots a road cross-section and river long-profile, because a 7 m road is two pixels wide on a 2 km map and a canted carriageway or pooling riverbed is invisible from above.
+
+**Click to inspect at full resolution.** A preview has to downsample to stay interactive, and that hides the fine detail these settings exist to control — measured on the same ground, the downsampled pass resolves **4.3× fewer features** along a scanline than the export does. Magnifying those pixels would only show a shape the export never produces. So hovering marks a 100 m box and clicking **recomputes that patch at the export's own resolution** (~0.5 s, bounded however large the export), with one click back to the cached overview.
 
 ### ⚡ Faster Exports
 Terrain Engineering went from **291 s to 64 s** (rivers 108 s → 7 s, heavy roads 46 s → 6 s). Shaping also used to **crash QGIS** at full resolution — it compared every pixel in a road's bounding box against every point along it, a 209 GiB allocation for a road spanning the map. A distance transform does the same job in one bounded pass.
