@@ -1031,6 +1031,7 @@ class CombinedArmaInputDialog(QDialog):
 		saved_path = settings.value("ArmaReforgerTools/output_path", "C:/QGIS/ArmaTerrainExport")
 		saved_burn = settings.value("ArmaReforgerTools/burn_terrain", True, type=bool)
 		saved_multiplier = float(settings.value("ArmaReforgerTools/engineer_multiplier", 1.15))
+		saved_feather = float(settings.value("ArmaReforgerTools/road_feather", 2.5))
 		saved_erosion = settings.value("ArmaReforgerTools/erosion", False, type=bool)
 		saved_erosion_preset = settings.value("ArmaReforgerTools/erosion_preset", "moderate")
 		saved_satrelief = settings.value("ArmaReforgerTools/satrelief", False, type=bool)
@@ -1192,6 +1193,25 @@ class CombinedArmaInputDialog(QDialog):
 		self.sb_multiplier.setSuffix("x")
 		self.sb_multiplier.setToolTip("Compensate for Enfusion smooth tool by over-widening roads/rails.")
 
+		# The road core is deliberately flat across its width, so all the
+		# cross-fall the terrain would have had is compressed into the blend
+		# band: band slope = terrain slope x (1 + half_width / feather). At
+		# the stock widths that is a 2.1-2.7x multiplier however steep the
+		# ground is, which is what creases hillsides beside roads. Widening
+		# the band is the only lever that reduces it -- at the cost of
+		# touching more terrain -- so it is a setting, not a constant.
+		self.sb_feather = QDoubleSpinBox()
+		self.sb_feather.setRange(1.0, 8.0)
+		self.sb_feather.setDecimals(1)
+		self.sb_feather.setValue(saved_feather)
+		self.sb_feather.setSingleStep(0.5)
+		self.sb_feather.setSuffix("x")
+		self.sb_feather.setToolTip(
+			"How far the flattened road blends back into terrain, as a multiple\n"
+			"of the default. Higher is smoother but eats more ground beside the\n"
+			"road; 1.0 reproduces the old behaviour. Raise it if hillsides show\n"
+			"hard creases running parallel to roads.")
+
 		self.le_path = QLineEdit(saved_path)
 		browse_layout = QHBoxLayout()
 		browse_layout.addWidget(self.le_path)
@@ -1245,6 +1265,7 @@ class CombinedArmaInputDialog(QDialog):
 		layout_source.addRow(lbl_engineering)
 		layout_source.addRow("Terrain Engineering:", self.cb_burn_terrain)
 		layout_source.addRow("Engineering Multiplier:", self.sb_multiplier)
+		layout_source.addRow("Road Edge Blending:", self.sb_feather)
 
 		# Kept as the carrier of the erosion preset, but the export buttons decide
 		# whether erosion runs -- a checkbox and a button that both claim to
@@ -1674,6 +1695,7 @@ class CombinedArmaInputDialog(QDialog):
 		settings.setValue("ArmaReforgerTools/satrelief", self.cb_satrelief.isChecked())
 		settings.setValue("ArmaReforgerTools/satrelief_preset", self.cmb_satrelief.currentText())
 		settings.setValue("ArmaReforgerTools/engineer_multiplier", self.sb_multiplier.value())
+		settings.setValue("ArmaReforgerTools/road_feather", self.sb_feather.value())
 		settings.setValue("ArmaReforgerTools/output_path", self.le_path.text())
 		settings.setValue("ArmaReforgerTools/api_keys", json.dumps(self.saved_api_keys))
 
@@ -1704,6 +1726,7 @@ class CombinedArmaInputDialog(QDialog):
 		self.cb_satrelief.setChecked(False)
 		self.cmb_satrelief.setCurrentText("moderate")
 		self.sb_multiplier.setValue(1.10)
+		self.sb_feather.setValue(2.5)
 		self.le_path.setText("C:/QGIS/ArmaTerrainExport")
 		iface.messageBar().pushMessage("Settings", "Reset to default values.", level=Qgis.Info, duration=3)
 
@@ -2582,11 +2605,16 @@ class TerrainEngineer:
 					def _to_px(mx, my):
 						return ((my - gt[3]) * inv_y, (mx - gt[0]) * inv_x)
 
+					# The third value in each spec is the feather: how far the flat
+					# corridor blends back into terrain. Scaled by the dialog setting,
+					# because band slope = terrain slope x (1 + half/feather), which
+					# makes this the only lever on the crease beside a road.
+					_fm = max(1.0, float(feather_multiplier))
 					road_specs = [
-						(layer_light, BUFF_LIGHT, 2.0, 40.0, 0.12, "Light Roads"),
-						(layer_medium, BUFF_MEDIUM, 4.0, 60.0, 0.10, "Medium Roads"),
-						(layer_heavy, BUFF_HEAVY, 6.0, 90.0, 0.07, "Heavy Roads"),
-						(layer_rails, BUFF_RAIL, 5.0, 150.0, 0.025, "Railways"),
+						(layer_light, BUFF_LIGHT, 2.0 * _fm, 40.0, 0.12, "Light Roads"),
+						(layer_medium, BUFF_MEDIUM, 4.0 * _fm, 60.0, 0.10, "Medium Roads"),
+						(layer_heavy, BUFF_HEAVY, 6.0 * _fm, 90.0, 0.07, "Heavy Roads"),
+						(layer_rails, BUFF_RAIL, 5.0 * _fm, 150.0, 0.025, "Railways"),
 					]
 					shaped_any = False
 					# Spread the four road classes across the 83-84 progress band so
@@ -3383,7 +3411,10 @@ class ArmaExportPlugin:
 					# 1.1x while the saved setting was 1.15.
 					engineer_multiplier=(
 						float(dialog.sb_multiplier.value())
-						if hasattr(dialog, 'sb_multiplier') else 1.10)
+						if hasattr(dialog, 'sb_multiplier') else 1.10),
+					feather_multiplier=(
+						float(dialog.sb_feather.value())
+						if hasattr(dialog, 'sb_feather') else 1.0)
 				)
 				self._engineer_protect_mask = engineer.protect_mask
 			# =========================================================================

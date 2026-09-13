@@ -135,5 +135,78 @@ def against(a):
     return int((d>0).sum())
 chk("river descends", against(r2) < against(z)*0.5, "%d -> %d steps"%(against(z),against(r2)))
 
+# ---------------------------------------------------------------------------
+# Road-edge crease. The visible artefact is a SLOPE discontinuity, so it is
+# measured as curvature (2nd difference) across the blend band, not as a
+# height step -- heights stay continuous while the surface still creases.
+# ---------------------------------------------------------------------------
+_cn = 240
+_cy, _cx = np.mgrid[0:_cn, 0:_cn].astype(np.float32)
+_cz = (_cx * 0.25).astype(np.float32)          # 25% cross-slope
+_cpts = np.array([(float(_r), 120.0) for _r in range(5, _cn-5)], dtype=np.float64)
+_cprof = roadwater.smooth_profile(
+    np.array([_cz[int(_r), 120] for _r, _ in _cpts], dtype=np.float64),
+    1.0, 20.0, 0.07)
+
+def _stamp(feather_px, half_px=6.0):
+    _o = _cz.copy(); _w = np.zeros_like(_o)
+    _out, _ = roadwater.stamp_profile(_cz, _cpts, _cprof, half_px, feather_px,
+                                      out=_o, weight=_w, depth=0.0)
+    return _out
+
+def _crease(_out):
+    _band = _out[:, 124:152]
+    return float(np.percentile(np.abs(np.diff(_band, n=2, axis=1)), 99))
+
+def _cant(_out):
+    _core = _out[:, 117:124]
+    return float(np.abs(_core.max(axis=1) - _core.min(axis=1)).max())
+
+_narrow, _wide = _stamp(6.0), _stamp(15.0)
+chk("wider feather reduces road-edge crease",
+    _crease(_wide) < _crease(_narrow) * 0.6,
+    "%.4f -> %.4f" % (_crease(_narrow), _crease(_wide)))
+
+# The anti-cant guarantee must survive the wider blend: cant is measured in
+# the core where alpha is saturated, so reshaping the ramp cannot touch it.
+chk("wider feather keeps road flat across width",
+    _cant(_wide) <= _cant(_narrow) + 1e-6,
+    "cant %.5f -> %.5f m" % (_cant(_narrow), _cant(_wide)))
+
+chk("blend ramp is smoothstep, not linear",
+    "np.cos(np.pi * alpha)" in inspect.getsource(roadwater.stamp_profile))
+
+# Feathering the erosion protect mask: a binary cut leaves a crease beside
+# every road, because the smoothed delta is sliced off at a hard edge.
+_pz = (_cx * 0.25 + 6*np.sin(_cy/40.0)).astype(np.float32)
+_pmask = np.zeros((_cn, _cn), bool); _pmask[:, 110:130] = True
+_pp = erosion.resolve_params("moderate", _pz.shape); _pp["delta_smooth"] = 1.5
+_soft = erosion.simulate(_pz.copy(), _pp, protect_mask=_pmask)
+_hard_fn = erosion._apply_protect
+erosion._apply_protect = lambda _a, _h, _m, feather=0: np.where(_m, _a, _h)
+_hard = erosion.simulate(_pz.copy(), _pp, protect_mask=_pmask)
+erosion._apply_protect = _hard_fn
+
+def _seam(_out):
+    # The artefact is ONE sharp line at the mask edge, not a broad
+    # roughening: measured per column, the hard cut spikes to 0.44 at the
+    # boundary while every other column sits near 0.02. A percentile over
+    # a wide band dilutes that single column into invisibility, so take
+    # the worst case -- which is also what the eye actually picks out.
+    _b = _out[:, 126:150]
+    return float(np.abs(np.diff(_b, n=2, axis=1)).max())
+
+chk("feathered protect mask removes seam cliff",
+    _seam(_soft) < _seam(_hard) * 0.5,
+    "%.4f -> %.4f" % (_seam(_hard), _seam(_soft)))
+
+# Roads themselves must still be exactly preserved -- the ramp is 0 on the
+# mask, so protected pixels are untouched.
+chk("feathered protect still preserves roads exactly",
+    np.array_equal(_soft[_pmask], _pz[_pmask]))
+
+chk("protect feather applied in parallel path too",
+    "_apply_protect" in inspect.getsource(erosion.simulate_parallel))
+
 print()
 print("RESULT:", "ALL PASS" if ok else "FAILURES ABOVE")

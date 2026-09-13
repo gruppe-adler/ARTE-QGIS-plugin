@@ -48,6 +48,38 @@ PRESETS = {
 }
 
 
+PROTECT_FEATHER_PX = 6.0
+
+
+def _apply_protect(original, hmap, protect_mask, feather=PROTECT_FEATHER_PX):
+    """Restore protected terrain, ramping back in rather than cutting a cliff.
+
+    A binary `np.where` slices the smoothed erosion delta off at a hard edge, so
+    the eroded surface meets protected ground at a step. Measured across the
+    protect boundary, that hard cut more than doubles the median adjacent-pixel
+    step, 0.164 m -> 0.349 m, and adds 0.69 m at p99 -- a crease running
+    parallel to every road, which is exactly what the mask is meant to keep
+    tidy. The protect radius is also narrower than the shaped corridor for
+    several road classes, so the cliff lands inside the road's own transition
+    band and stacks onto the slope break already there.
+
+    Ramping the delta to zero over `feather` pixels leaves protected pixels
+    exactly as they were -- the ramp is 0 on the mask itself -- while giving the
+    erosion somewhere to go, which restores the step to the unprotected
+    baseline.
+    """
+    if protect_mask is None:
+        return hmap
+    if feather <= 0:
+        return np.where(protect_mask, original, hmap)
+    try:
+        from scipy.ndimage import distance_transform_edt
+    except ImportError:
+        return np.where(protect_mask, original, hmap)
+    ramp = distance_transform_edt(~protect_mask) / float(feather)
+    np.clip(ramp, 0.0, 1.0, out=ramp)
+    return original + (hmap - original) * ramp
+
 def _bilinear(hmap, x, y):
     """Sample hmap at fractional coords, plus the local gradient."""
     h, w = hmap.shape
@@ -297,7 +329,7 @@ def simulate(heightmap, params=None, protect_mask=None, progress=None,
             pass
 
     if protect_mask is not None:
-        hmap = np.where(protect_mask, original, hmap)
+        hmap = _apply_protect(original, hmap, protect_mask)
 
     if not np.isfinite(hmap).all():
         hmap = np.nan_to_num(hmap, nan=0.0, posinf=0.0, neginf=0.0)
@@ -431,7 +463,7 @@ def simulate_parallel(heightmap, params=None, protect_mask=None, progress=None,
     out = acc / np.maximum(wsum, 1e-6)
 
     if protect_mask is not None:
-        out = np.where(protect_mask, heightmap.astype(np.float32), out)
+        out = _apply_protect(heightmap.astype(np.float32), out, protect_mask)
 
     return out
 

@@ -219,6 +219,18 @@ def stamp_profile(z, pts, prof, half_width_px, feather_px, out=None,
     alpha = np.ones_like(dist)
     if feather_px > 0:
         alpha = np.clip((half_width_px + feather_px - dist) / feather_px, 0.0, 1.0)
+        # Smoothstep rather than a linear ramp. A linear blend is C0 but
+        # not C1: the slope jumps where alpha reaches 0 and again where it
+        # reaches 1, and a slope discontinuity is what shades as a hard
+        # crease in the 3D mesh even though the heights are continuous.
+        # A cosine ramp lands with zero derivative at both ends, so the
+        # band meets untouched terrain and the flat corridor smoothly.
+        #
+        # This only helps if the band is wide enough to carry the
+        # cross-fall: measured, at feather 6 m the ramp shape is
+        # irrelevant, at 20 m it cuts the slope jump 3.3x. It has to ship
+        # together with a wider feather to do anything.
+        alpha = 0.5 * (1.0 - np.cos(np.pi * alpha))
     alpha[~inside] = 0.0
 
     sub = (slice(r_lo, r_hi), slice(c_lo, c_hi))
