@@ -240,17 +240,28 @@ def stamp_profile(z, pts, prof, half_width_px, feather_px, out=None,
 # ---------------------------------------------------------------------------
 
 def apply_roads(z, features, pixel_size, half_width_m, feather_m,
-                smooth_m=60.0, max_grade=0.08, log=None, progress=None):
+                smooth_m=60.0, max_grade=0.08, log=None, progress=None,
+                width_multiplier=1.0):
     """Flatten each road/rail corridor along its own smoothed profile.
 
     `progress` is called as progress(done, total) after each feature. Shaping a
     full export takes tens of seconds; without a per-feature tick the caller has
     nothing to report and the UI simply stops responding, which is
     indistinguishable from a hang.
+
+    `width_multiplier` over-widens the corridor to compensate for Enfusion's
+    smoothing narrowing it on import. It applies to a feature's own OSM width
+    as well as to the class default -- upstream's buffer expression multiplies
+    both, and leaving OSM-tagged roads unmultiplied made the setting silently
+    do nothing for every road whose width OSM actually knows. The result is
+    capped at 1.5x the class default, as upstream does, so one mis-tagged
+    `width` cannot flatten a runway.
     """
     out = z.astype(np.float32).copy()
     weight = np.zeros(z.shape, np.float32)
+    mult = max(width_multiplier, 1e-6)
     default_half_px = max(0.5, half_width_m / max(pixel_size, 1e-6))
+    max_half_px = default_half_px * 1.5
     feather_px = max(0.5, feather_m / max(pixel_size, 1e-6))
 
     total = len(features)
@@ -260,8 +271,12 @@ def apply_roads(z, features, pixel_size, half_width_m, feather_m,
         # default where the tags did not say.
         if isinstance(item, tuple):
             pts, width_m = item
-            half_px = (max(0.5, (width_m * 0.5) / max(pixel_size, 1e-6))
-                       if width_m else default_half_px)
+            if width_m:
+                half_px = min(
+                    max(0.5, (width_m * mult * 0.5) / max(pixel_size, 1e-6)),
+                    max_half_px)
+            else:
+                half_px = default_half_px
         else:
             pts, half_px = item, default_half_px
 

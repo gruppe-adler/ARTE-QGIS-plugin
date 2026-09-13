@@ -2425,7 +2425,8 @@ class TerrainEngineer:
 							half_width_m=half_w, feather_m=feather,
 							smooth_m=smooth_m, max_grade=grade,
 							log=lambda m, _n=nm: debug_log("  [%s] %s" % (_n, m)),
-							progress=_road_tick)
+							progress=_road_tick,
+							width_multiplier=engineer_multiplier)
 						shaped_any = True
 					used_profile_roads = shaped_any
 				except MemoryError as _rw_mem:
