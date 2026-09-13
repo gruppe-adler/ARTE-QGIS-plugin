@@ -237,11 +237,17 @@ class ErosionPreviewDialog(QDialog):
         self.sl_detail = self._slider(16, 256, 128)
         self.sl_radius = self._slider(0, 6, 2)
         self.sl_deposit = self._slider(0, 100, 30)
+        # Droplets cut and deposit into single pixels, so the raw result
+        # reverses direction almost every pixel and reads as a fizzing
+        # surface. Smoothing only what erosion changed keeps the source DEM
+        # crisp while letting cuts and deposits join into continuous landform.
+        self.sl_smooth = self._slider(0, 40, 15)
 
         self.lbl_strength = QLabel("1.00")
         self.lbl_detail = QLabel("128")
         self.lbl_radius = QLabel("2")
         self.lbl_deposit = QLabel("0.30")
+        self.lbl_smooth = QLabel("1.5")
 
         self.chk_protect = QCheckBox("Preserve roads / rivers shaped by OSM")
         self.chk_protect.setChecked(True)
@@ -262,6 +268,7 @@ class ErosionPreviewDialog(QDialog):
             ("Detail (droplet life)", self.sl_detail, self.lbl_detail),
             ("Channel width", self.sl_radius, self.lbl_radius),
             ("Deposition", self.sl_deposit, self.lbl_deposit),
+            ("Smoothing (less fizz)", self.sl_smooth, self.lbl_smooth),
         ]
         for i, (name, widget, lab) in enumerate(rows):
             grid.addWidget(QLabel(name), i, 0)
@@ -309,7 +316,8 @@ class ErosionPreviewDialog(QDialog):
         root.addLayout(top)
         root.addLayout(btns)
 
-        for s in (self.sl_strength, self.sl_detail, self.sl_radius, self.sl_deposit):
+        for s in (self.sl_strength, self.sl_detail, self.sl_radius,
+                  self.sl_deposit, self.sl_smooth):
             s.valueChanged.connect(self._on_change)
         self.cmb_preset.currentTextChanged.connect(self._on_preset)
         # Without this the checkbox only affected the export, never the preview.
@@ -351,6 +359,7 @@ class ErosionPreviewDialog(QDialog):
         self.lbl_detail.setText(str(self.sl_detail.value()))
         self.lbl_radius.setText(str(self.sl_radius.value()))
         self.lbl_deposit.setText("%.2f" % (self.sl_deposit.value() / 100.0))
+        self.lbl_smooth.setText("%.1f" % (self.sl_smooth.value() / 10.0))
 
     def _on_preset(self, name):
         if name == "custom":
@@ -402,6 +411,7 @@ class ErosionPreviewDialog(QDialog):
         cfg['ttl'] = self.sl_detail.value()
         cfg['radius'] = self.sl_radius.value()
         cfg['deposition_coeff'] = self.sl_deposit.value() / 100.0
+        cfg['delta_smooth'] = self.sl_smooth.value() / 10.0
         return cfg
 
     def result_settings(self):
