@@ -234,6 +234,55 @@ def _probe_nodata(path):
         return None
 
 
+def _constant_edge_band(arr, valid, max_depth=48, tol=1e-4):
+	"""Mask of constant-valued bands welded along the raster edges.
+
+	Scans inward from each side and marks the leading run of pixels that repeat
+	the edge value. A real landscape does not hold one elevation for a dozen
+	pixels and then jump metres per pixel, so such a run is an artefact of
+	resampling at the limit of source coverage, not terrain.
+
+	`max_depth` bounds the scan so a genuinely flat area -- a lake at the map
+	edge, say -- cannot be eaten wholesale.
+	"""
+	import numpy as _np
+	bad = _np.zeros(arr.shape, bool)
+	h, w = arr.shape
+
+	# rows from the top / bottom
+	for c in range(w):
+		col = arr[:, c]
+		first = col[0]; k = 0
+		while k < max_depth and abs(float(col[k]) - float(first)) <= tol:
+			k += 1
+		if k >= 3:
+			bad[:k, c] = True
+		last = col[-1]; k = 0
+		while k < max_depth and abs(float(col[-1 - k]) - float(last)) <= tol:
+			k += 1
+		if k >= 3:
+			bad[h - k:, c] = True
+
+	# columns from the left / right
+	for r in range(h):
+		row = arr[r]
+		first = row[0]; k = 0
+		while k < max_depth and abs(float(row[k]) - float(first)) <= tol:
+			k += 1
+		if k >= 3:
+			bad[r, :k] = True
+		last = row[-1]; k = 0
+		while k < max_depth and abs(float(row[-1 - k]) - float(last)) <= tol:
+			k += 1
+		if k >= 3:
+			bad[r, w - k:] = True
+
+	# Never mark everything invalid.
+	if bad.all():
+		return _np.zeros(arr.shape, bool)
+	return bad
+
+
 def _fill_voids_in_place(path, step_callback=None):
     """Replace void pixels in `path` with the nearest valid elevation.
 
@@ -256,6 +305,14 @@ def _fill_voids_in_place(path, step_callback=None):
         valid = arr > -10000.0
         if nd is not None and nd <= -10000.0:
             valid &= (arr != nd)
+
+        # Whatever produced them, a raster can arrive with a constant band welded
+        # along an edge: a run of identical values for a dozen-plus pixels, ending
+        # in a cliff where real terrain resumes. Measured on a real export: 14 px
+        # of one value, then 19 m per pixel. Those are the vertical walls at the
+        # map border in the editor. They are not marked NoData, so widen the mask
+        # to include them and let the mirrored fill repair them like any void.
+        valid &= ~_constant_edge_band(arr, valid)
 
         n_void = int((~valid).sum())
         if n_void == 0 or not valid.any():
@@ -3193,7 +3250,14 @@ class ArmaExportPlugin:
 					source_crs=source_crs,
 					context=context,
 					pixel_size=(xmax - xmin) / resolution_w,
-					step_callback=step
+					step_callback=step,
+					# Without this the engineer silently used its own 1.10
+					# default and the dialog's Engineering Multiplier did
+					# nothing at all -- the debug log gave it away, reporting
+					# 1.1x while the saved setting was 1.15.
+					engineer_multiplier=(
+						float(dialog.sb_multiplier.value())
+						if hasattr(dialog, 'sb_multiplier') else 1.10)
 				)
 				self._engineer_protect_mask = engineer.protect_mask
 			# =========================================================================
