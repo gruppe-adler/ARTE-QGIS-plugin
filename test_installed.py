@@ -55,6 +55,42 @@ chk("fill removes every void", int((_b == arte.VOID_SENTINEL).sum()) == 0,
     "filled %d" % _n)
 chk("fill restores real elevation", _b.min() > 2000.0, "min %.1f" % _b.min())
 
+# --- satellite micro-relief ---
+_srm = arte._arte_import('satrelief')
+from scipy.ndimage import gaussian_filter as _gf
+_rng = np.random.default_rng(3)
+_N = 384
+_yy, _xx = np.mgrid[0:_N, 0:_N].astype(np.float32)
+_terr = _gf((2400 + 90*np.sin(_xx/22.)*np.cos(_yy/26.)).astype(np.float32), 2)
+# imagery that genuinely shades the terrain: hillshade it and add mild albedo
+_gy, _gx = np.gradient(_gf(_terr, 3))
+_sl = np.arctan(np.hypot(_gx, _gy)); _asp = np.arctan2(-_gx, _gy)
+_hs = (np.sin(np.radians(30))*np.cos(_sl) +
+       np.cos(np.radians(30))*np.sin(_sl)*np.cos(np.radians(360-315+90)-_asp))
+_good = np.dstack([np.clip(_hs*120+130 + _rng.normal(0,4,(_N,_N)), 0, 255)]*3).astype(np.float32)
+_p = _srm.resolve_params('moderate')
+
+_out, _info = _srm.apply(_terr, _good, 1.0, _p)
+chk("satrelief runs on shaded imagery", _info['applied'], "fit %.3f" % _info['fit'])
+chk("satrelief output is bounded",
+    np.isfinite(_out).all() and np.abs(_out-_terr).max() <= _p['clamp_m']+1e-3,
+    "max %.2f m" % np.abs(_out-_terr).max())
+
+# THE check that answers "must never make output worse": degenerate imagery
+_bad = {
+    "snow":  np.dstack([np.full((_N,_N),240.0)+_rng.normal(0,2,(_N,_N))]*3),
+    "noise": _rng.random((_N,_N,3))*255,
+}
+_refused = all(np.array_equal(_srm.apply(_terr, v.astype(np.float32), 1.0, _p)[0], _terr)
+               for v in _bad.values())
+chk("satrelief refuses degenerate imagery", _refused)
+
+# protect mask must be honoured
+_pm = np.zeros((_N,_N), bool); _pm[100:140, :] = True
+_o2, _i2 = _srm.apply(_terr, _good, 1.0, _p, protect_mask=_pm)
+chk("satrelief honours protect mask",
+    (not _i2['applied']) or np.array_equal(_o2[_pm], _terr[_pm]))
+
 eng=inspect.getsource(arte.TerrainEngineer.run)
 chk("per-feature roads wired", "used_profile_roads" in eng)
 chk("per-feature rivers wired", "used_profile_rivers" in eng)

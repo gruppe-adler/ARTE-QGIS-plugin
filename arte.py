@@ -378,6 +378,26 @@ def _fill_voids_in_place(path, step_callback=None):
         return 0
 
 
+def _find_satmap(directory):
+	"""Newest satmap in `directory`, or None."""
+	import os
+	if not directory or not os.path.isdir(directory):
+		return None
+	cands = []
+	for name in os.listdir(directory):
+		low = name.lower()
+		if low.startswith("satmap") and low.endswith((".png", ".tif", ".tiff")):
+			path = os.path.join(directory, name)
+			try:
+				cands.append((os.path.getmtime(path), path))
+			except OSError:
+				continue
+	if not cands:
+		return None
+	cands.sort()
+	return cands[-1][1]
+
+
 def _find_heightmap(directory):
 	"""Newest raw (un-eroded) heightmap export in `directory`, or None.
 
@@ -1013,6 +1033,8 @@ class CombinedArmaInputDialog(QDialog):
 		saved_multiplier = float(settings.value("ArmaReforgerTools/engineer_multiplier", 1.15))
 		saved_erosion = settings.value("ArmaReforgerTools/erosion", False, type=bool)
 		saved_erosion_preset = settings.value("ArmaReforgerTools/erosion_preset", "moderate")
+		saved_satrelief = settings.value("ArmaReforgerTools/satrelief", False, type=bool)
+		saved_satrelief_preset = settings.value("ArmaReforgerTools/satrelief_preset", "moderate")
 
 		self.sb_x = QDoubleSpinBox()
 		self.sb_x.setRange(-180.0, 180.0)
@@ -1247,6 +1269,31 @@ class CombinedArmaInputDialog(QDialog):
 		ero_row.addWidget(self.btn_erosion_preview)
 		layout_source.addRow("Erosion:", self.cb_erosion)
 		layout_source.addRow("Erosion Strength:", ero_row)
+
+		self.cb_satrelief = QCheckBox("Recover micro-relief from the satellite image")
+		self.cb_satrelief.setChecked(saved_satrelief)
+		self.cb_satrelief.setToolTip(
+			"On bare terrain the satmap's brightness is mostly sun shading, which\n"
+			"is a direct function of slope -- so real gullies and scree can be\n"
+			"recovered at the export's own resolution, well below what a 30 m DEM\n"
+			"can represent. Runs before erosion and is independent of it.\n\n"
+			"The imagery is checked first: if it shows no terrain shading (snow,\n"
+			"cloud, dense forest, flat farmland) the pass declines and leaves the\n"
+			"heightmap untouched. Use Preview to see the measured fit score.")
+		self.cmb_satrelief = QComboBox()
+		self.cmb_satrelief.addItems(["subtle", "moderate", "strong"])
+		self.cmb_satrelief.setCurrentText(saved_satrelief_preset)
+		self.btn_satrelief_preview = QPushButton("Preview / Tune...")
+		self.btn_satrelief_preview.setToolTip(
+			"Check whether this satmap actually supports the reconstruction,\n"
+			"and tune strength, before committing to a full export.")
+		self.btn_satrelief_preview.clicked.connect(self.open_satrelief_preview)
+		sat_row = QHBoxLayout()
+		sat_row.addWidget(self.cmb_satrelief, 1)
+		sat_row.addWidget(self.btn_satrelief_preview)
+		layout_source.addRow("Satellite Relief:", self.cb_satrelief)
+		layout_source.addRow("Relief Strength:", sat_row)
+		self.satrelief_settings = None
 
 		self.btn_roadwater_preview = QPushButton("Preview Roads & Rivers...")
 		self.btn_roadwater_preview.setToolTip(
@@ -1624,6 +1671,8 @@ class CombinedArmaInputDialog(QDialog):
 		settings.setValue("ArmaReforgerTools/burn_terrain", self.cb_burn_terrain.isChecked())
 		settings.setValue("ArmaReforgerTools/erosion", self.cb_erosion.isChecked())
 		settings.setValue("ArmaReforgerTools/erosion_preset", self.cmb_erosion.currentText())
+		settings.setValue("ArmaReforgerTools/satrelief", self.cb_satrelief.isChecked())
+		settings.setValue("ArmaReforgerTools/satrelief_preset", self.cmb_satrelief.currentText())
 		settings.setValue("ArmaReforgerTools/engineer_multiplier", self.sb_multiplier.value())
 		settings.setValue("ArmaReforgerTools/output_path", self.le_path.text())
 		settings.setValue("ArmaReforgerTools/api_keys", json.dumps(self.saved_api_keys))
@@ -1652,6 +1701,8 @@ class CombinedArmaInputDialog(QDialog):
 		self.cb_burn_terrain.setChecked(True)
 		self.cb_erosion.setChecked(False)
 		self.cmb_erosion.setCurrentText("moderate")
+		self.cb_satrelief.setChecked(False)
+		self.cmb_satrelief.setCurrentText("moderate")
 		self.sb_multiplier.setValue(1.10)
 		self.le_path.setText("C:/QGIS/ArmaTerrainExport")
 		iface.messageBar().pushMessage("Settings", "Reset to default values.", level=Qgis.Info, duration=3)
@@ -1716,6 +1767,51 @@ class CombinedArmaInputDialog(QDialog):
 			self.le_apikey.setEchoMode(use_normal)
 		else:
 			self.le_apikey.setEchoMode(use_password)
+
+	def open_satrelief_preview(self):
+		"""Check whether this satmap supports micro-relief, and tune it."""
+		from qgis.PyQt.QtWidgets import QMessageBox
+		try:
+			import numpy as _np
+			from osgeo import gdal as _gdal
+		except Exception as exc:
+			QMessageBox.warning(self, "Satellite Relief", "Could not load GDAL/numpy: %s" % exc)
+			return
+
+		path = self.le_path.text().strip()
+		src = _find_heightmap(path)
+		sat = _find_satmap(path)
+		if not src or not sat:
+			QMessageBox.information(
+				self, "Satellite Relief",
+				"This needs both a heightmap and a satmap in the output directory.\n\n"
+				"Run an export once, then use this button.")
+			return
+
+		try:
+			ds = _gdal.Open(src)
+			arr = ds.GetRasterBand(1).ReadAsArray().astype('float32')
+			ds = None
+			ds = _gdal.Open(sat)
+			bands = min(3, ds.RasterCount)
+			rgb = _np.dstack([ds.GetRasterBand(i + 1).ReadAsArray()
+							  for i in range(bands)]).astype('float32')
+			ds = None
+			pixel = float(self.sb_size_w.value()) / float(self.sb_res_w.value())
+		except Exception as exc:
+			QMessageBox.warning(self, "Satellite Relief", "Could not read rasters: %s" % exc)
+			return
+
+		try:
+			satrelief_preview = _arte_import('satrelief_preview')
+			dlg = satrelief_preview.SatReliefPreviewDialog(
+				arr, rgb, pixel_size=pixel, parent=self)
+			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
+			if accepted:
+				self.satrelief_settings = dlg.result_settings()
+				self.cb_satrelief.setChecked(True)
+		except Exception as exc:
+			QMessageBox.warning(self, "Satellite Relief", "Preview failed: %s" % exc)
 
 	def open_erosion_preview(self):
 		"""Fetch the DEM for the current extent and open the tuning dialog.
@@ -2883,6 +2979,24 @@ class ArmaExportPlugin:
 		# fall back to the preset chosen in the combo.
 		# The button the user pressed is the authority: "Export (no erosion)"
 		# never erodes, whatever the tickbox says.
+		# Satellite micro-relief is independent of the erosion buttons: it can
+		# run on either export, because it recovers real detail rather than
+		# inventing it.
+		self._satrelief_settings = None
+		if getattr(dialog, 'cb_satrelief', None) is not None and dialog.cb_satrelief.isChecked():
+			_tuned_sr = getattr(dialog, 'satrelief_settings', None)
+			if _tuned_sr:
+				self._satrelief_settings = _tuned_sr
+			else:
+				try:
+					_sr = _arte_import('satrelief')
+					self._satrelief_settings = {
+						'params': _sr.resolve_params(dialog.cmb_satrelief.currentText())
+					}
+				except Exception as _sr_exc:
+					QgsMessageLog.logMessage('Satellite relief unavailable: %s' % _sr_exc,
+											 'ArmaTerrainExport', Qgis.Warning)
+
 		self._erosion_settings = None
 		_mode = getattr(dialog, 'export_mode', 'plain')
 		if _mode != 'eroded':
@@ -3323,6 +3437,52 @@ class ArmaExportPlugin:
 			else:
 				min_val = float(np.min(elevation_resampled))
 				max_val = float(np.max(elevation_resampled))
+
+			# --- SATELLITE MICRO-RELIEF ---------------------------------------
+			# Runs BEFORE erosion. Two reasons: erosion derives its vertical scale
+			# and deviation cap from the terrain's own statistics, so feeding it
+			# real micro-relief makes droplets follow real gullies rather than
+			# interpolation artefacts; and erosion's delta smoothing protects only
+			# what erosion itself changed, so relief added afterwards would be
+			# partly erased.
+			satrelief_settings = getattr(self, "_satrelief_settings", None)
+			if satrelief_settings:
+				try:
+					step(85, "Recovering micro-relief from imagery...")
+					_sr = _arte_import('satrelief')
+					_satds = gdal.Open(output_sat_png)
+					_nb = min(3, _satds.RasterCount)
+					_rgb = np.dstack([_satds.GetRasterBand(i + 1).ReadAsArray()
+									  for i in range(_nb)]).astype(np.float32)
+					_satds = None
+					_protect = getattr(self, "_engineer_protect_mask", None)
+					_px = float(size_w) / float(resolution_w)
+					_sr_out, _sr_info = _sr.apply(
+						elevation_resampled.astype(np.float32), _rgb, _px,
+						params=satrelief_settings.get('params'),
+						protect_mask=_protect,
+						progress=lambda f, m: step(85, m))
+					if _sr_info.get('applied'):
+						elevation_resampled = _sr_out.astype(elevation_resampled.dtype)
+						min_val = float(np.min(elevation_resampled))
+						max_val = float(np.max(elevation_resampled))
+						QgsMessageLog.logMessage(
+							"Satellite micro-relief applied: fit %.3f, sun %.0f/%.0f, "
+							"amplitude %.2f m" % (
+								_sr_info['fit'], _sr_info['azimuth'],
+								_sr_info['altitude'], _sr_info.get('amplitude', 0.0)),
+							"ArmaTerrainExport", Qgis.Info)
+					else:
+						# Declining is the designed outcome for imagery that carries no
+						# terrain shading, not an error.
+						QgsMessageLog.logMessage(
+							"Satellite micro-relief skipped: %s"
+							% _sr_info.get('reason', 'unknown'),
+							"ArmaTerrainExport", Qgis.Info)
+				except Exception as _sr_exc:
+					QgsMessageLog.logMessage(
+						"Satellite micro-relief failed: %s" % _sr_exc,
+						"ArmaTerrainExport", Qgis.Warning)
 
 			# --- HYDRAULIC EROSION -------------------------------------------
 			erosion_settings = getattr(self, "_erosion_settings", None)
