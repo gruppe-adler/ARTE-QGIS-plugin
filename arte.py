@@ -2192,7 +2192,7 @@ class TerrainEngineer:
 
 	def run(self, output_tif, output_dir, timestamp, xmin, ymin, xmax, ymax,
 			resolution_w, resolution_h, target_crs, source_crs, context, pixel_size, step_callback, engineer_multiplier=1.10,
-			write_diff_map=False):
+			feather_multiplier=1.0, write_diff_map=False):
 
 		created_temp_files = []
 		log_path = os.path.join(output_dir, f"engineer_debug_{timestamp}.txt")

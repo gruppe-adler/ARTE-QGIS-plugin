@@ -105,6 +105,19 @@ chk("per-feature roads wired", "used_profile_roads" in eng)
 chk("per-feature rivers wired", "used_profile_rivers" in eng)
 chk("ribbon fallback kept", "apply_flat_ribbon" in eng)
 
+# Every keyword the export passes to TerrainEngineer.run must exist on run().
+# The whole suite passed while the export died at launch with "unexpected
+# keyword argument 'feather_multiplier'" -- the tests only ever checked that
+# source strings were present, never that the call itself could be made.
+_sig = inspect.signature(arte.TerrainEngineer.run).parameters
+_ex = inspect.getsource(arte.ArmaExportPlugin.execute_export)
+_seg = _ex[_ex.find("engineer.run("):][:1400]
+import re as _re
+_kw = set(_re.findall(r"(\w+)=", _seg))
+_miss = sorted(k for k in _kw if k not in _sig and k not in ("type", "key"))
+chk("engineer.run call site matches its signature", not _miss,
+    ("missing: %s" % _miss) if _miss else "")
+
 # numeric behaviour
 rng=np.random.default_rng(0); N=256
 y,x=np.mgrid[0:N,0:N]/float(N)
