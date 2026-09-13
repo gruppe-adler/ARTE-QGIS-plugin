@@ -89,6 +89,9 @@ Where the DEM source does not quite cover the requested area, GDAL fills the sho
 
 ---
 
+### 📝 **Changelog**
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
 ### 📄 **License**
 This project is licensed under the MIT License - free to use, modify, and distribute.
 
