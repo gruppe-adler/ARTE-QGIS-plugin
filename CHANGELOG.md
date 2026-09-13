@@ -18,6 +18,27 @@ numbering; 1.1.0 is the last upstream release this fork was taken from.
   path honours it; the per-feature shaping never read it and used one constant
   per class. Each road is now shaped at its own width: 7 m → 6 px, 4 m → 4 px,
   12 m → 12 px.
+- **The map edge was a vertical wall.** Where the DEM source did not quite reach
+  the requested area, the void was filled by copying one edge elevation across
+  it, leaving a dead-flat shelf that met real terrain at a cliff -- single-pixel
+  jumps of 85 m. The fill now mirrors the terrain just inside the boundary back
+  out so the filled area carries the same texture, bounded to a slope budget at
+  the terrain's own 95th-percentile gradient so a steep mountainside cannot be
+  stacked into a few pixels of border. Mirroring without that bound was itself a
+  wall: 259 m of rise over 8 m of ground. Measured after: filled band rises
+  22.8 m against the real terrain's 13.9 m, steepest step 4.14 m/px against a
+  terrain p95 of 3.94, flat runs 70 px -> 1 px.
+- **Constant bands welded along an edge are now detected and repaired**, and the
+  repair runs again after erosion -- erosion is not masked away from the filled
+  margin, so it re-flattened the border after the first pass.
+- **The Engineering Multiplier did nothing.** Two separate faults. The export
+  never passed it to `TerrainEngineer.run`, so the engineer always used its own
+  1.10 default -- the debug log gave it away, reporting 1.1x while the saved
+  setting was 1.15. And the per-feature shaping applied it only to the class
+  default, not to a road's own OSM width, so it was inert for every road whose
+  width OSM knows -- 5 of 6 heavy-class ways on the Bamiyan map. Now applied to
+  both and capped at 1.5x the class default, as upstream does, so a mis-tagged
+  40 m width clamps to 20.7 m instead of 46 m.
 - **Two dead-straight segments meeting at an elbow in the preview.** Preview-only
   — the export converts geometry through the raster's own GeoTransform and was
   never affected. Overpass returns whole ways whenever any part intersects the
