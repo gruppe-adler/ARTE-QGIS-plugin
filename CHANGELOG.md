@@ -3,6 +3,34 @@
 All notable changes to this fork. Versions follow the upstream plugin's
 numbering; 1.1.0 is the last upstream release this fork was taken from.
 
+## [1.2.2] — 2026-09-13
+
+### Fixed
+
+- **Roads were flattened about four times too wide.** `BUFF_*` are upstream's
+  buffer distances — full corridor widths — but they were passed straight in as
+  `half_width_m`, so a Heavy road came out 27.6 m across (39.6 m with the blend)
+  where a real primary road is about 7 m. Measured on a test slope: modified
+  band 14 px → 6 px.
+- **Per-road widths from OSM were discarded.** ARTE already derives a real width
+  per way from the `width` and `lanes` tags and stores it as `arte_dyn_width`
+  — 7.0 m for the Bamyan primaries, 4.0 m for the tertiary. Upstream's raster
+  path honours it; the per-feature shaping never read it and used one constant
+  per class. Each road is now shaped at its own width: 7 m → 6 px, 4 m → 4 px,
+  12 m → 12 px.
+- **Two dead-straight segments meeting at an elbow in the preview.** Both causes
+  were preview-only — the export converts geometry through the raster's own
+  GeoTransform and was never affected. The preview built its Overpass bounding
+  box from the size spinboxes as if they held ground metres, but they hold a
+  Web-Mercator-descaled value, so the box was 1/cos(latitude) too small (21.8%
+  at Bamiyan) and roads were stretched outward until their edges left the
+  raster. Those out-of-raster vertices were then clamped to the border rather
+  than clipped — 65% of vertices lie outside a Bamiyan export, since Overpass
+  returns whole ways — pinning long runs onto the edge and stamping straight
+  ribbons along it. The preview now takes its extent from the raster's
+  georeferencing where available, and splits polylines at the boundary instead
+  of clamping: 7 edge-ribbon lines → 0, with all 35 source ways preserved.
+
 ## [1.2.1] — 2026-09-13
 
 ### Fixed
@@ -100,5 +128,6 @@ array).
 
 ---
 
+[1.2.2]: https://github.com/gruppe-adler/ARTE-QGIS-plugin/releases/tag/1.2.2
 [1.2.1]: https://github.com/gruppe-adler/ARTE-QGIS-plugin/releases/tag/1.2.1
 [1.2.0]: https://github.com/gruppe-adler/ARTE-QGIS-plugin/releases/tag/1.2.0
