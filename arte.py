@@ -135,6 +135,82 @@ DEFAULT_SOURCES = [
 VOID_SENTINEL = -32768.0
 
 
+def _raster_extent_4326(path):
+	"""(west, south, east, north) in degrees for a raster on disk, or None.
+
+	Read from the file's own GeoTransform and projection, which is what the
+	export uses, so the preview cannot drift from it.
+	"""
+	try:
+		from osgeo import gdal as _gdal, osr as _osr
+		ds = _gdal.Open(path)
+		if ds is None:
+			return None
+		gt = ds.GetGeoTransform()
+		nx, ny = ds.RasterXSize, ds.RasterYSize
+		wkt = ds.GetProjection()
+		ds = None
+		if not gt or not wkt:
+			return None
+
+		corners = [(gt[0] + gt[1] * x + gt[2] * y,
+					gt[3] + gt[4] * x + gt[5] * y)
+				   for x, y in ((0, 0), (nx, 0), (0, ny), (nx, ny))]
+
+		src = _osr.SpatialReference()
+		src.ImportFromWkt(wkt)
+		dst = _osr.SpatialReference()
+		dst.ImportFromEPSG(4326)
+		try:
+			# GDAL 3 honours the authority's axis order (lat, lon) unless told
+			# otherwise; force lon/lat so the numbers mean what they read.
+			src.SetAxisMappingStrategy(_osr.OAMS_TRADITIONAL_GIS_ORDER)
+			dst.SetAxisMappingStrategy(_osr.OAMS_TRADITIONAL_GIS_ORDER)
+		except AttributeError:
+			pass
+		tr = _osr.CoordinateTransformation(src, dst)
+
+		lons, lats = [], []
+		for mx, my in corners:
+			lon, lat = tr.TransformPoint(mx, my)[:2]
+			lons.append(lon)
+			lats.append(lat)
+		return (min(lons), min(lats), max(lons), max(lats))
+	except Exception:
+		return None
+
+
+def _clip_polyline(pts, h, w, margin=2.0):
+	"""Split a pixel polyline into the runs that lie inside the raster.
+
+	Returns a list of arrays, each with at least two points. A road that leaves
+	the map and comes back yields two separate lines rather than one with a
+	straight chord joining the exit and entry points.
+
+	`margin` keeps a little geometry just outside the frame so a corridor at the
+	edge still feathers correctly instead of ending abruptly at the border.
+	"""
+	import numpy as _np
+	if pts is None or len(pts) < 2:
+		return []
+	inside = ((pts[:, 0] >= -margin) & (pts[:, 0] <= h - 1 + margin) &
+			  (pts[:, 1] >= -margin) & (pts[:, 1] <= w - 1 + margin))
+	if inside.all():
+		return [pts]
+	out = []
+	run = []
+	for pt, ok in zip(pts, inside):
+		if ok:
+			run.append(pt)
+		else:
+			if len(run) >= 2:
+				out.append(_np.array(run, dtype=float))
+			run = []
+	if len(run) >= 2:
+		out.append(_np.array(run, dtype=float))
+	return out
+
+
 def _probe_nodata(path):
     """The NoData value a source raster declares, or None.
 
@@ -1594,7 +1670,8 @@ class CombinedArmaInputDialog(QDialog):
 				pass
 			# Hand the preview the same OSM centrelines the export will shape,
 			# so 'preserve roads' has something to act on.
-			protect_lines = self._osm_preview_lines(arr.shape)
+			protect_lines = self._osm_preview_lines(
+				arr.shape, extent=_raster_extent_4326(src))
 			dlg = erosion_preview.ErosionPreviewDialog(
 				arr, pixel_size=pixel, parent=self, protect_lines=protect_lines)
 			accepted = dlg.exec_() if hasattr(dlg, 'exec_') else dlg.exec()
@@ -1605,34 +1682,46 @@ class CombinedArmaInputDialog(QDialog):
 		except Exception as exc:
 			QMessageBox.warning(self, "Erosion Preview", "Preview failed: %s" % exc)
 
-	def _osm_preview_lines(self, shape):
+	def _osm_preview_lines(self, shape, extent=None):
 		"""Road and waterway centrelines for the current extent, in pixel coords.
 
 		Queries Overpass directly rather than reusing TerrainEngineer, which only
 		runs inside a full export. Returns an empty list on any failure -- the
 		preview is still useful without it, so a network problem must not raise.
+
+		`extent` is (west, south, east, north) in degrees, taken from the
+		heightmap's own georeferencing. Deriving it from the size spinboxes
+		instead was wrong: those hold a Web-Mercator-descaled value, so treating
+		them as ground metres built a box 1/cos(latitude) too small -- 21.8% at
+		Bamiyan -- and every road was stretched outward from centre until the
+		edges fell outside the raster.
 		"""
 		try:
 			import json, urllib.request
 			import numpy as _np
 
-			cx = float(self.sb_x.value())
-			cy = float(self.sb_y.value())
-			size_w = float(self.sb_size_w.value())
-			size_h = float(self.sb_size_h.value())
-			if size_w <= 0 or size_h <= 0:
+			if extent is not None:
+				west, south, east, north = extent
+			else:
+				cx = float(self.sb_x.value())
+				cy = float(self.sb_y.value())
+				size_w = float(self.sb_size_w.value())
+				size_h = float(self.sb_size_h.value())
+				if size_w <= 0 or size_h <= 0:
+					return []
+				# Fallback only. The spinboxes are Mercator-descaled, so undo
+				# that before treating them as ground metres.
+				sf = 1.0 / max(math.cos(math.radians(cy)), 1e-6)
+				m_lat = 111132.92 - 559.82 * math.cos(2 * math.radians(cy))
+				m_lon = 111412.84 * math.cos(math.radians(cy))
+				if m_lat <= 0 or m_lon <= 0:
+					return []
+				dlat = (size_h * sf / 2.0) / m_lat
+				dlon = (size_w * sf / 2.0) / m_lon
+				south, north = cy - dlat, cy + dlat
+				west, east = cx - dlon, cx + dlon
+			if not (east > west and north > south):
 				return []
-
-			# Rough metres-per-degree at this latitude is accurate enough for a
-			# preview bounding box.
-			m_lat = 111132.92 - 559.82 * math.cos(2 * math.radians(cy))
-			m_lon = 111412.84 * math.cos(math.radians(cy))
-			if m_lat <= 0 or m_lon <= 0:
-				return []
-			dlat = (size_h / 2.0) / m_lat
-			dlon = (size_w / 2.0) / m_lon
-			south, north = cy - dlat, cy + dlat
-			west, east = cx - dlon, cx + dlon
 
 			query = ('[out:json][timeout:45];('
 					 'way["highway"](%f,%f,%f,%f);'
@@ -1660,6 +1749,8 @@ class CombinedArmaInputDialog(QDialog):
 			h, w = shape
 			lines = []
 			for el in data.get("elements", []):
+				if el.get("type") != "way":
+					continue
 				geom = el.get("geometry")
 				if not geom or len(geom) < 2:
 					continue
@@ -1668,7 +1759,15 @@ class CombinedArmaInputDialog(QDialog):
 					col = (node["lon"] - west) / (east - west) * (w - 1)
 					row = (north - node["lat"]) / (north - south) * (h - 1)
 					pts.append((row, col))
-				lines.append(_np.array(pts, dtype=float))
+				# Overpass returns whole ways whenever any part intersects the
+				# box, so most geometry runs well outside the raster -- 65% of
+				# vertices on a real Bamiyan export. Those used to be clamped to
+				# the border further down the pipeline, which pinned long runs of
+				# points onto the edge and stamped dead-straight road ribbons
+				# along it; a way leaving one edge and re-entering another drew a
+				# false chord across the map. Split instead, and keep the pieces
+				# that are actually inside.
+				lines.extend(_clip_polyline(_np.array(pts, dtype=float), h, w))
 			return lines
 		except Exception:
 			return []
@@ -1746,7 +1845,7 @@ class CombinedArmaInputDialog(QDialog):
 		# Prefer the real OSM geometry for this extent; fall back to a straight
 		# demo line so the controls are still explorable offline.
 		h, w = arr.shape
-		lines = self._osm_preview_lines(arr.shape)
+		lines = self._osm_preview_lines(arr.shape, extent=_raster_extent_4326(src))
 		if lines:
 			roads = lines
 			rivers = []
@@ -2306,8 +2405,15 @@ class TerrainEngineer:
 					# Spread the four road classes across the 83-84 progress band so
 					# the dialog keeps moving and stays cancellable. Shaping takes
 					# tens of seconds; a static bar reads as a hang.
-					for _si, (lyr, half_w, feather, smooth_m, grade, nm) in enumerate(road_specs):
-						lines = roadwater.extract_lines(lyr, _to_px)
+					for _si, (lyr, full_w, feather, smooth_m, grade, nm) in enumerate(road_specs):
+						# BUFF_* are upstream's buffer distances -- full corridor
+						# widths. Passing one straight in as half_width_m made every
+						# road twice as wide as intended: a Heavy road came out
+						# flattened 27.6 m across (39.6 m with the blend) where a
+						# real primary road is about 7 m.
+						half_w = full_w * 0.5
+						lines = roadwater.extract_lines(lyr, _to_px,
+														width_field="arte_dyn_width")
 						if not lines:
 							continue
 

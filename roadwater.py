@@ -250,12 +250,21 @@ def apply_roads(z, features, pixel_size, half_width_m, feather_m,
     """
     out = z.astype(np.float32).copy()
     weight = np.zeros(z.shape, np.float32)
-    half_px = max(0.5, half_width_m / max(pixel_size, 1e-6))
+    default_half_px = max(0.5, half_width_m / max(pixel_size, 1e-6))
     feather_px = max(0.5, feather_m / max(pixel_size, 1e-6))
 
     total = len(features)
     done = 0
-    for pts in features:
+    for item in features:
+        # A feature may carry its own width from OSM; fall back to the class
+        # default where the tags did not say.
+        if isinstance(item, tuple):
+            pts, width_m = item
+            half_px = (max(0.5, (width_m * 0.5) / max(pixel_size, 1e-6))
+                       if width_m else default_half_px)
+        else:
+            pts, half_px = item, default_half_px
+
         pts = np.asarray(pts, np.float64)
         if len(pts) < 2:
             continue
@@ -319,8 +328,16 @@ def apply_rivers(z, features, pixel_size, half_width_m, feather_m,
     return out
 
 
-def extract_lines(layer, transform_fn):
-    """QGIS vector layer -> list of (row, col) pixel polylines."""
+def extract_lines(layer, transform_fn, width_field=None):
+    """QGIS vector layer -> list of (row, col) pixel polylines.
+
+    With `width_field`, returns (pts, width_m) pairs instead of bare arrays.
+    ARTE derives a real per-road width from the OSM `width` and `lanes` tags and
+    stores it on each feature (`arte_dyn_width`), using -1 to mean "not
+    specified". Passing that through lets each road be shaped at its own width
+    rather than one constant per class -- the difference between a 7 m highway
+    and a 4 m tertiary road actually reaching the terrain.
+    """
     feats = []
     if layer is None:
         return feats
@@ -328,6 +345,16 @@ def extract_lines(layer, transform_fn):
         geom = f.geometry()
         if geom is None or geom.isEmpty():
             continue
+        width = None
+        if width_field:
+            try:
+                raw = f[width_field]
+                if raw is not None:
+                    raw = float(raw)
+                    if raw > 0:
+                        width = raw
+            except Exception:
+                width = None
         if geom.isMultipart():
             parts = geom.asMultiPolyline()
         else:
@@ -337,5 +364,5 @@ def extract_lines(layer, transform_fn):
                 continue
             pts = np.array([transform_fn(p.x(), p.y()) for p in part],
                            dtype=np.float64)
-            feats.append(pts)
+            feats.append((pts, width) if width_field else pts)
     return feats
